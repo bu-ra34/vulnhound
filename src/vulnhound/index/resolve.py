@@ -4,6 +4,71 @@ from __future__ import annotations
 
 from ..models import FunctionInfo, ModuleInfo
 
+# Compat-shim module prefixes -> real stdlib names (longest prefix wins).
+COMPAT_PREFIXES: dict[str, str] = {
+    "six.moves.urllib.request": "urllib.request",
+    "six.moves.urllib.parse": "urllib.parse",
+    "six.moves.urllib.error": "urllib.error",
+    "six.moves.urllib.response": "urllib.response",
+    "six.moves.urllib_parse": "urllib.parse",
+    "six.moves.urllib_request": "urllib.request",
+    "six.moves.urllib_error": "urllib.error",
+    "six.moves.urllib": "urllib",
+    "six.moves.http_client": "http.client",
+    "six.moves.http_cookies": "http.cookies",
+    "six.moves.http_cookiejar": "http.cookiejar",
+    "six.moves.BaseHTTPServer": "http.server",
+    "six.moves.SimpleHTTPServer": "http.server",
+    "six.moves.CGIHTTPServer": "http.server",
+    "six.moves.cPickle": "pickle",
+    "six.moves.configparser": "configparser",
+    "six.moves.queue": "queue",
+    "six.moves.builtins": "builtins",
+    "six.moves.socketserver": "socketserver",
+    "six.moves.html_parser": "html.parser",
+    "six.moves.html_entities": "html.entities",
+    "six.moves.xmlrpc_client": "xmlrpc.client",
+    "six.moves.xmlrpc_server": "xmlrpc.server",
+    "six.moves.reprlib": "reprlib",
+    "six.moves.copyreg": "copyreg",
+    "six.moves.shlex_quote": "shlex.quote",
+    "six.moves.getcwd": "os.getcwd",
+    "six.moves.input": "input",
+    "six.moves.zip": "zip",
+    "six.moves.map": "map",
+    "six.moves.range": "range",
+    "future.moves.urllib.request": "urllib.request",
+    "future.moves.urllib.parse": "urllib.parse",
+    "future.moves.urllib.error": "urllib.error",
+    "future.moves.urllib": "urllib",
+    "future.moves.http.client": "http.client",
+    "future.moves.http.server": "http.server",
+    "future.moves.http.cookies": "http.cookies",
+    "future.moves.http.cookiejar": "http.cookiejar",
+    "future.moves.http": "http",
+    "future.moves.pickle": "pickle",
+    "future.moves.configparser": "configparser",
+    "future.moves.queue": "queue",
+    "future.moves.builtins": "builtins",
+    "future.moves.socketserver": "socketserver",
+    "future.moves.xmlrpc": "xmlrpc",
+    "future.builtins": "builtins",
+    "past.builtins": "builtins",
+}
+_COMPAT_SORTED = sorted(COMPAT_PREFIXES.items(), key=lambda kv: -len(kv[0]))
+
+
+def normalize_compat(name: str) -> str:
+    """Map ``six.moves.*`` / ``future.moves.*`` names onto their stdlib equivalents."""
+    if not name.startswith(("six.", "future.", "past.")):
+        return name
+    for pre, real in _COMPAT_SORTED:
+        if name == pre:
+            return real
+        if name.startswith(pre + "."):
+            return real + name[len(pre) :]
+    return name
+
 
 class Resolver:
     def __init__(
@@ -28,7 +93,7 @@ class Resolver:
             if target is None:
                 return dotted
             full = f"{target}.{rest}" if rest else target
-        return self._follow(full)
+        return normalize_compat(self._follow(full))
 
     def _follow(self, full: str) -> str:
         """Follow package re-exports (``from .sub import f`` in ``__init__``)."""

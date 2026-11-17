@@ -104,6 +104,13 @@ SOURCES: tuple[Source, ...] = (
     Source("django.http.HttpRequest.FILES", "django-request", "uploaded files"),
     Source("django.http.HttpRequest.path", "django-request", "URL path"),
     # Django views receive `request` as first param; engine marks it tainted and uses attrs below.
+    Source("rest_framework.request.Request.data", "django-request", "DRF parsed body"),
+    Source("rest_framework.request.Request.query_params", "django-request", "DRF query string"),
+    Source(
+        "werkzeug.datastructures.FileStorage.filename",
+        "flask-request",
+        "client-supplied upload filename (attacker-controlled)",
+    ),
     Source("request", "django-request-param", "first parameter of a Django view function"),
     Source("fastapi.param", "fastapi-param", "route function parameters of fastapi routes"),
     Source("fastapi.Request.query_params", "fastapi-param", "starlette request"),
@@ -120,7 +127,32 @@ SOURCES: tuple[Source, ...] = (
 
 # Attributes of a Django request parameter that carry user data.
 DJANGO_REQUEST_ATTRS: frozenset[str] = frozenset(
-    {"GET", "POST", "body", "COOKIES", "META", "FILES", "path", "path_info", "headers"}
+    {
+        "GET",
+        "POST",
+        "body",
+        "COOKIES",
+        "META",
+        "FILES",
+        "path",
+        "path_info",
+        "headers",
+        "data",
+        "query_params",
+    }
+)
+# Django REST Framework request attributes carrying user data (engine reads via getattr).
+DRF_REQUEST_ATTRS: tuple[str, ...] = ("data", "query_params")
+
+# Tornado: handler base classes and methods whose return value is user input.
+TORNADO_HANDLER_BASES: tuple[str, ...] = ("tornado.web.RequestHandler",)
+TORNADO_ARG_METHODS: tuple[str, ...] = (
+    "get_argument",
+    "get_arguments",
+    "get_query_argument",
+    "get_query_arguments",
+    "get_body_argument",
+    "get_body_arguments",
 )
 
 # Decorator suffixes marking FastAPI / Starlette routes (receiver is FastAPI or APIRouter).
@@ -599,6 +631,261 @@ def _build_sinks() -> tuple[Sink, ...]:
         ),
         Sink(
             "starlette.responses.RedirectResponse",
+            "open-redirect",
+            "CWE-601",
+            _L,
+            (0,),
+            ("url",),
+            "tainted redirect target",
+        ),
+    ]
+    # --- extra gaps: ssrf
+    for cls in ("httpx.Client", "httpx.AsyncClient"):
+        s.append(Sink(f"{cls}.build_request", "ssrf", "CWE-918", _M, (1,), ("url",), "tainted URL"))
+        s.append(
+            Sink(
+                f"{cls}.send", "ssrf", "CWE-918", _M, (0,), ("request",), "request built from taint"
+            )
+        )
+        s.append(Sink(f"{cls}.stream", "ssrf", "CWE-918", _M, (1,), ("url",), "tainted URL"))
+    s += [
+        Sink("httpx.stream", "ssrf", "CWE-918", _M, (1,), ("url",), "tainted URL"),
+        Sink("httpx.Request", "ssrf", "CWE-918", _M, (1,), ("url",), "tainted URL"),
+        Sink("requests.Request", "ssrf", "CWE-918", _M, (1,), ("url",), "tainted URL"),
+        Sink("requests.models.Request", "ssrf", "CWE-918", _M, (1,), ("url",), "tainted URL"),
+        Sink(
+            "requests.Session.send",
+            "ssrf",
+            "CWE-918",
+            _M,
+            (0,),
+            ("request",),
+            "request built from taint",
+        ),
+        Sink(
+            "requests.Session.prepare_request",
+            "ssrf",
+            "CWE-918",
+            _M,
+            (0,),
+            ("request",),
+            "request built from taint",
+        ),
+        Sink(
+            "requests.PreparedRequest.prepare_url",
+            "ssrf",
+            "CWE-918",
+            _M,
+            (0,),
+            ("url",),
+            "tainted URL",
+        ),
+        Sink(
+            "requests.models.PreparedRequest.prepare_url",
+            "ssrf",
+            "CWE-918",
+            _M,
+            (0,),
+            ("url",),
+            "tainted URL",
+        ),
+        Sink("urllib3.PoolManager.urlopen", "ssrf", "CWE-918", _M, (1,), ("url",), "tainted URL"),
+        Sink("urllib3.request", "ssrf", "CWE-918", _M, (1,), ("url",), "tainted URL"),
+        Sink(
+            "urllib3.PoolManager.connection_from_url",
+            "ssrf",
+            "CWE-918",
+            _M,
+            (0,),
+            ("url",),
+            "tainted URL",
+        ),
+        Sink("urllib3.HTTPConnectionPool", "ssrf", "CWE-918", _M, (0,), ("host",), "tainted host"),
+        Sink("urllib3.HTTPSConnectionPool", "ssrf", "CWE-918", _M, (0,), ("host",), "tainted host"),
+        Sink("aiohttp.request", "ssrf", "CWE-918", _M, (1,), ("url",), "tainted URL"),
+        Sink(
+            "aiohttp.ClientSession.ws_connect", "ssrf", "CWE-918", _M, (0,), ("url",), "tainted URL"
+        ),
+        Sink(
+            "urllib.request.OpenerDirector.open",
+            "ssrf",
+            "CWE-918",
+            _M,
+            (0,),
+            ("fullurl",),
+            "tainted URL",
+        ),
+        Sink(
+            "http.client.HTTPConnection.putrequest",
+            "ssrf",
+            "CWE-918",
+            _M,
+            (1,),
+            ("url",),
+            "tainted request target",
+        ),
+    ]
+    # --- extra gaps: path traversal
+    s += [
+        Sink(
+            "werkzeug.datastructures.FileStorage.save",
+            "path-traversal",
+            "CWE-22",
+            _H,
+            (0,),
+            ("dst",),
+            "upload destination path built from taint",
+        ),
+        Sink(
+            "flask.request.files[].save",
+            "path-traversal",
+            "CWE-22",
+            _H,
+            (0,),
+            ("dst",),
+            "upload destination path built from taint",
+        ),
+        Sink(
+            "*.save",
+            "path-traversal",
+            "CWE-22",
+            _M,
+            (0,),
+            ("dst",),
+            "FileStorage.save on unresolved receiver; destination path",
+        ),
+        Sink(
+            "starlette.responses.FileResponse",
+            "path-traversal",
+            "CWE-22",
+            _H,
+            (0,),
+            ("path",),
+            "tainted path; arbitrary file read",
+        ),
+        Sink(
+            "fastapi.responses.FileResponse",
+            "path-traversal",
+            "CWE-22",
+            _H,
+            (0,),
+            ("path",),
+            "tainted path; arbitrary file read",
+        ),
+        Sink(
+            "flask.helpers.send_file",
+            "path-traversal",
+            "CWE-22",
+            _H,
+            (0,),
+            ("path_or_file",),
+            "tainted path; arbitrary file read",
+        ),
+        Sink(
+            "shutil.unpack_archive",
+            "path-traversal",
+            "CWE-22",
+            _H,
+            (0, 1),
+            ("filename", "extract_dir"),
+            "zip/tar-slip: untrusted archive or target dir",
+        ),
+        Sink(
+            "zipfile.ZipFile.extract",
+            "path-traversal",
+            "CWE-22",
+            _M,
+            (0, 1),
+            ("member", "path"),
+            "tainted member name or target",
+        ),
+        Sink(
+            "tarfile.TarFile.extract",
+            "path-traversal",
+            "CWE-22",
+            _M,
+            (0, 1),
+            ("member", "path"),
+            "tainted member name or target",
+        ),
+    ]
+    # --- extra gaps: ssti / deserialization / redirect
+    s += [
+        Sink(
+            "jinja2.environment.Template",
+            "ssti",
+            "CWE-1336",
+            _H,
+            (0,),
+            ("source",),
+            "template source must not be tainted",
+        ),
+        Sink(
+            "jinja2.environment.Environment.from_string",
+            "ssti",
+            "CWE-1336",
+            _H,
+            (0,),
+            ("source",),
+            "template source must not be tainted",
+        ),
+        Sink(
+            "tornado.template.Template",
+            "ssti",
+            "CWE-1336",
+            _H,
+            (0,),
+            ("template_string",),
+            "template source must not be tainted",
+        ),
+        Sink(
+            "numpy.load",
+            "deserialization",
+            "CWE-502",
+            _C,
+            (0,),
+            ("file",),
+            "allow_pickle=True unpickles untrusted data",
+            requires_kwarg={"allow_pickle": True},
+        ),
+        Sink(
+            "pickle.Unpickler",
+            "deserialization",
+            "CWE-502",
+            _C,
+            (0,),
+            ("file",),
+            "untrusted stream reaches an unpickler",
+        ),
+        Sink(
+            "_pickle.load",
+            "deserialization",
+            "CWE-502",
+            _C,
+            (0,),
+            ("file",),
+            "untrusted stream reaches an unpickler",
+        ),
+        Sink(
+            "cloudpickle.load",
+            "deserialization",
+            "CWE-502",
+            _C,
+            (0,),
+            ("file",),
+            "untrusted stream reaches an unpickler",
+        ),
+        Sink(
+            "joblib.numpy_pickle.load",
+            "deserialization",
+            "CWE-502",
+            _C,
+            (0,),
+            ("filename",),
+            "untrusted file reaches an unpickler",
+        ),
+        Sink(
+            "tornado.web.RequestHandler.redirect",
             "open-redirect",
             "CWE-601",
             _L,

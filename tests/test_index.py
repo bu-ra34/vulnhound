@@ -162,3 +162,28 @@ def test_corrupt_cache_ignored(proj):
     for p in (proj / ".vulnhound" / "cache").glob("*.json"):
         p.write_text('{"schema": 999}')
     assert "app.db.run" in build_index(proj).functions
+
+
+def test_six_moves_and_future_shims_normalized(tmp_path):
+    write(
+        tmp_path,
+        {
+            "m.py": (
+                "from six.moves.http_client import HTTPConnection\n"
+                "from six.moves.urllib.request import urlopen\n"
+                "from six.moves import cPickle, configparser\n"
+                "from six.moves import urllib\n"
+                "import six\n"
+                "from future.moves.urllib.parse import urlparse\n"
+            ),
+        },
+    )
+    idx = build_index(tmp_path)
+    r = lambda d: idx.resolve("m", d)  # noqa: E731
+    assert r("HTTPConnection") == "http.client.HTTPConnection"
+    assert r("urlopen") == "urllib.request.urlopen"
+    assert r("cPickle.loads") == "pickle.loads"
+    assert r("configparser.ConfigParser") == "configparser.ConfigParser"
+    assert r("urllib.request.urlopen") == "urllib.request.urlopen"
+    assert r("six.moves.cPickle.load") == "pickle.load"
+    assert r("urlparse") == "urllib.parse.urlparse"

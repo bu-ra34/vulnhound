@@ -92,3 +92,46 @@ def test_fixtures_parse_and_expectations_known():
             assert rule in RULES, (f, rule)
         expected += len(found)
     assert expected >= 20
+
+
+def test_new_ssrf_sinks():
+    for name in (
+        "httpx.Client.send",
+        "httpx.AsyncClient.send",
+        "httpx.Client.build_request",
+        "requests.Session.send",
+        "requests.Request",
+        "urllib3.PoolManager.urlopen",
+        "aiohttp.ClientSession.get",
+        "http.client.HTTPSConnection",
+    ):
+        assert [x.rule for x in match_sink(name)][:1] == ["ssrf"], name
+    assert match_sink("httpx.Client.build_request")[0].arg_positions == (1,)
+
+
+def test_filestorage_save_and_filename_source():
+    (s,) = match_sink("werkzeug.datastructures.FileStorage.save")
+    assert s.rule == "path-traversal" and s.arg_positions == (0,)
+    assert match_sink("flask.request.files[].save")[0].rule == "path-traversal"
+    assert match_sink("f.save")[0].pattern == "*.save"
+    assert match_source("werkzeug.datastructures.FileStorage.filename").kind == "flask-request"
+
+
+def test_drf_and_tornado_constants():
+    assert specs.DRF_REQUEST_ATTRS == ("data", "query_params")
+    assert set(specs.DRF_REQUEST_ATTRS) <= specs.DJANGO_REQUEST_ATTRS
+    assert specs.TORNADO_HANDLER_BASES == ("tornado.web.RequestHandler",)
+    assert "get_query_argument" in specs.TORNADO_ARG_METHODS
+    assert match_sink("tornado.web.RequestHandler.redirect")[0].rule == "open-redirect"
+    assert match_source("rest_framework.request.Request.data").kind == "django-request"
+
+
+def test_archive_response_and_deser_sinks():
+    for name in ("shutil.unpack_archive", "starlette.responses.FileResponse"):
+        assert match_sink(name)[0].rule == "path-traversal", name
+    assert match_sink("starlette.responses.RedirectResponse")[0].rule == "open-redirect"
+    assert match_sink("mako.template.Template")[0].rule == "ssti"
+    (n,) = match_sink("numpy.load")
+    assert n.requires_kwarg == {"allow_pickle": True}
+    for name in ("pandas.read_pickle", "torch.load", "joblib.load", "dill.loads"):
+        assert match_sink(name)[0].rule == "deserialization", name
