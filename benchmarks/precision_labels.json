@@ -1,0 +1,404 @@
+{
+ "description": "Hand labels for vulnhound findings (CLI defaults: grouped reps, tests excluded). Key = project|rule|sink_path:line|source_path:line. label: tp | fp | unclear. fp categories: same-host-redirect, db-lookup, guarded, not-attacker-source, wrong-sink-semantics, test-or-example, other. Auth requirements are notes only, never fp reasons.",
+ "projects": {
+  "apache_superset-6.1.0": {
+   "name": "apache_superset",
+   "version": "6.1.0"
+  },
+  "django_cms-5.1.3": {
+   "name": "django_cms",
+   "version": "5.1.3"
+  },
+  "fastapi_users-15.0.5": {
+   "name": "fastapi_users",
+   "version": "15.0.5"
+  },
+  "flask_admin-2.2.1": {
+   "name": "flask_admin",
+   "version": "2.2.1"
+  },
+  "flask_appbuilder-5.3.0": {
+   "name": "flask_appbuilder",
+   "version": "5.3.0"
+  },
+  "flaskbb-3.0.0": {
+   "name": "flaskbb",
+   "version": "3.0.0"
+  },
+  "gradio-6.32.0": {
+   "name": "gradio",
+   "version": "6.32.0"
+  },
+  "httpbin-0.10.4": {
+   "name": "httpbin",
+   "version": "0.10.4"
+  },
+  "jupyter_server-2.21.1": {
+   "name": "jupyter_server",
+   "version": "2.21.1"
+  },
+  "label_studio-1.23.2": {
+   "name": "label_studio",
+   "version": "1.23.2"
+  },
+  "mlflow-3.18.0": {
+   "name": "mlflow",
+   "version": "3.18.0"
+  },
+  "nautobot-3.2.9": {
+   "name": "nautobot",
+   "version": "3.2.9"
+  },
+  "netbox-4.7.5": {
+   "name": "netbox",
+   "version": "4.7.5"
+  },
+  "pretalx-2026.2.1": {
+   "name": "pretalx",
+   "version": "2026.2.1"
+  },
+  "saleor-2.10.1": {
+   "name": "saleor",
+   "version": "2.10.1"
+  },
+  "streamlit-1.67.0": {
+   "name": "streamlit",
+   "version": "1.67.0"
+  },
+  "wagtail-8.1": {
+   "name": "wagtail",
+   "version": "8.1"
+  }
+ },
+ "labels": {
+  "apache_superset-6.1.0|open-redirect|superset/views/core.py:442|superset/views/core.py:389": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "apache_superset-6.1.0|open-redirect|superset/views/utils.py:90|superset/views/utils.py:83": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "apache_superset-6.1.0|ssti|superset/jinja_context.py:1127|superset/jinja_context.py:1057": {
+   "label": "fp",
+   "category": "db-lookup",
+   "note": "template text is a stored dataset metric expression, selected by id; env is sandboxed"
+  },
+  "django_cms-5.1.3|open-redirect|cms/admin/pageadmin.py:1138|cms/admin/pageadmin.py:1138": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "django_cms-5.1.3|open-redirect|cms/admin/pageadmin.py:333|cms/utils/i18n.py:59": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "django_cms-5.1.3|open-redirect|cms/admin/pageadmin.py:413|cms/admin/pageadmin.py:412": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "django_cms-5.1.3|open-redirect|cms/views.py:120|cms/views.py:117": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "flask_admin-2.2.1|open-redirect|flask_admin/actions.py:138|flask_admin/helpers.py:177": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "url_has_allowed_host_and_scheme / validator guard on the value"
+  },
+  "flask_admin-2.2.1|path-traversal|flask_admin/contrib/mongoengine/view.py:729|flask_admin/contrib/mongoengine/view.py:718": {
+   "label": "fp",
+   "category": "wrong-sink-semantics",
+   "note": "send_file gets a GridFS file object fetched by id, not a path; db/coll names select collections only"
+  },
+  "gradio-6.32.0|open-redirect|gradio/oauth.py:146|gradio/oauth.py:125": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "host from SPACE_HOST env; attacker value only in query string"
+  },
+  "gradio-6.32.0|open-redirect|gradio/oauth.py:187|gradio/oauth.py:223": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect is to relative /login/callback?<urlencoded target>"
+  },
+  "gradio-6.32.0|open-redirect|gradio/oauth.py:267|gradio/oauth.py:254": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "target rebuilt as '/' + lstripped path, host dropped"
+  },
+  "gradio-6.32.0|open-redirect|gradio/routes.py:517|gradio/route_utils.py:568": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect to the request's own root URL (Host header echo, no victim impact)"
+  },
+  "gradio-6.32.0|path-traversal|gradio/route_utils.py:1620|gradio/static_server.py:91": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "utils.is_allowed_file with blocked_paths/allowed_paths gates the path"
+  },
+  "gradio-6.32.0|ssrf|gradio/route_utils.py:1511|gradio/routes.py:1358": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "safehttpx validates host; redirects re-validated"
+  },
+  "gradio-6.32.0|ssrf|gradio/routes.py:1339|gradio/routes.py:1331": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "build_proxy_request only proxies hosts of configured proxy_urls ending in .hf.space"
+  },
+  "jupyter_server-2.21.1|path-traversal|jupyter_server/services/contents/handlers.py:246|jupyter_server/base/handlers.py:703": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "authenticated contents API; ContentsManager confines paths to root_dir and checks hidden files"
+  },
+  "label_studio-1.23.2|open-redirect|label_studio/io_storages/proxy_api.py:83|label_studio/io_storages/proxy_api.py:327": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "fileuri must match a configured storage bucket; redirect is to a presigned URL for that bucket (manager had unclear)"
+  },
+  "label_studio-1.23.2|path-traversal|label_studio/data_export/models.py:126|label_studio/data_export/api.py:226": {
+   "label": "fp",
+   "category": "not-attacker-source",
+   "note": "filename built from project id, timestamp and md5 of data; no attacker-controlled path component"
+  },
+  "mlflow-3.18.0|code-exec|mlflow/genai/scorers/scorer_utils.py:227|mlflow/server/gateway_api.py:193": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "server path returns a non-executing handle (Scorer.model_validate) and guardrail refuses custom-code scorers before model_validate; scorer comes from stored entity (manager had unclear)"
+  },
+  "mlflow-3.18.0|path-traversal|mlflow/assistant/skill_installer.py:88|mlflow/server/assistant/api.py:1034": {
+   "label": "unclear",
+   "note": "remote-denied admin endpoint copies bundled skills into attacker-chosen custom_path; content fixed, only destination controlled (agree with manager: unclear)"
+  },
+  "mlflow-3.18.0|path-traversal|mlflow/server/handlers.py:1349|mlflow/server/handlers.py:4912": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "validate_path_is_safe + _validate_attachment_path applied to path (reassigned guard result)"
+  },
+  "mlflow-3.18.0|ssrf|mlflow/server/handlers.py:2676|mlflow/server/handlers.py:2672": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "_validate_gateway_path whitelists exact path forms; host is fixed target_uri"
+  },
+  "nautobot-3.2.9|code-exec|nautobot/core/api/utils.py:59|nautobot/core/api/views.py:924": {
+   "label": "fp",
+   "category": "db-lookup",
+   "note": "import name derived from ContentType row's model class, not from request text"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/core/views/generic.py:588|nautobot/core/views/generic.py:587": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/core/views/mixins.py:1327|nautobot/core/views/mixins.py:201": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "url_has_allowed_host_and_scheme / validator guard on the value"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/core/views/mixins.py:1544|nautobot/core/views/mixins.py:201": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "url_has_allowed_host_and_scheme / validator guard on the value"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/core/views/mixins.py:1679|nautobot/core/views/mixins.py:201": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "url_has_allowed_host_and_scheme / validator guard on the value"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/core/views/mixins.py:610|nautobot/core/views/mixins.py:201": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "url_has_allowed_host_and_scheme / validator guard on the value"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/core/views/mixins.py:632|nautobot/core/views/mixins.py:201": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "url_has_allowed_host_and_scheme / validator guard on the value"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/dcim/views.py:5872|nautobot/dcim/views.py:5854": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "url_has_allowed_host_and_scheme / validator guard on the value"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/dcim/views.py:593|nautobot/dcim/views.py:593": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/extras/views.py:1292|nautobot/extras/views.py:1291": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/extras/views.py:2591|nautobot/extras/views.py:2849": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "_return_url validated with url_has_allowed_host_and_scheme"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/ipam/views.py:758|nautobot/ipam/views.py:758": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/users/views.py:136|nautobot/users/views.py:127": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "url_has_allowed_host_and_scheme / validator guard on the value"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/users/views.py:414|nautobot/users/views.py:414": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "nautobot-3.2.9|path-traversal|nautobot/dcim/api/views.py:566|nautobot/dcim/api/views.py:551": {
+   "label": "fp",
+   "category": "wrong-sink-semantics",
+   "note": "X-NAPALM-* headers are device login credentials/args for the NAPALM driver; not a file path"
+  },
+  "nautobot-3.2.9|path-traversal|nautobot/extras/utils.py:843|nautobot/extras/views.py:2820": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "realpath prefix check against JOB_QUEUE_PATH before open"
+  },
+  "nautobot-3.2.9|ssti|nautobot/core/utils/data.py:117|nautobot/core/api/views.py:1059": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "jinja engine is NautobotSandboxedEnvironment (sandboxed by design; authenticated render endpoint)"
+  },
+  "netbox-4.7.5|open-redirect|netbox/dcim/views.py:5324|netbox/dcim/views.py:5295": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "get_return_url validates return_url host (safe_for_redirect)"
+  },
+  "netbox-4.7.5|open-redirect|netbox/netbox/middleware.py:290|netbox/netbox/middleware.py:290": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "netbox-4.7.5|open-redirect|netbox/netbox/views/generic/bulk_views.py:183|netbox/netbox/views/generic/bulk_views.py:204": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect to reverse()-built list URL"
+  },
+  "netbox-4.7.5|open-redirect|netbox/netbox/views/generic/bulk_views.py:460|netbox/netbox/views/generic/bulk_views.py:460": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "netbox-4.7.5|open-redirect|netbox/netbox/views/generic/object_views.py:342|netbox/netbox/views/generic/object_views.py:330": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/cfp/views/locale.py:19|src/pretalx/common/views/redirect.py:58": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "get_next_url: url_has_allowed_host_and_scheme(allowed_hosts=None) rejects absolute URLs"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/cfp/views/wizard.py:34|src/pretalx/cfp/views/wizard.py:33": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/common/middleware/domains.py:94|src/pretalx/common/middleware/domains.py:71": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect to the event's configured custom domain; request path appended"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/common/middleware/event.py:129|src/pretalx/common/middleware/event.py:54": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect to the event's configured custom domain; request path appended"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/common/views/mixins.py:464|src/pretalx/common/views/mixins.py:464": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/common/views/mixins.py:592|src/pretalx/common/views/mixins.py:592": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/common/views/redirect.py:49|src/pretalx/common/views/redirect.py:32": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "url must be a signed value (signing.Signer unsign) and referer same-site"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/common/views/redirect.py:93|src/pretalx/common/views/redirect.py:91": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "next goes into ?next= query of the login URL, not the redirect target"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/orga/views/organiser.py:144|src/pretalx/orga/views/organiser.py:144": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/orga/views/review.py:1027|src/pretalx/orga/views/review.py:1027": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/orga/views/review.py:450|src/pretalx/orga/views/review.py:450": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/orga/views/schedule.py:126|src/pretalx/orga/views/schedule.py:126": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "pretalx-2026.2.1|open-redirect|src/pretalx/orga/views/speaker.py:352|src/pretalx/orga/views/speaker.py:352": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "pretalx-2026.2.1|path-traversal|src/pretalx/api/views/upload.py:81|src/pretalx/api/views/upload.py:57": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "Django FileField/storage.save sanitizes the upload name (basename + valid name)"
+  },
+  "pretalx-2026.2.1|path-traversal|src/pretalx/cfp/flow/base.py:276|src/pretalx/cfp/flow/base.py:176": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "Django storage.save sanitizes uploaded file name"
+  },
+  "pretalx-2026.2.1|path-traversal|src/pretalx/common/views/mixins.py:513|src/pretalx/common/views/mixins.py:437": {
+   "label": "fp",
+   "category": "db-lookup",
+   "note": "cached_file id looked up in DB; path comes from stored FileField"
+  },
+  "wagtail-8.1|open-redirect|wagtail/admin/views/bulk_action/base_bulk_action.py:165|wagtail/admin/views/bulk_action/base_bulk_action.py:41": {
+   "label": "fp",
+   "category": "guarded",
+   "note": "get_valid_next_url_from_request validates next; fallback request.path"
+  },
+  "wagtail-8.1|open-redirect|wagtail/admin/views/generic/workflow.py:157|wagtail/admin/views/generic/workflow.py:127": {
+   "label": "fp",
+   "category": "not-attacker-source",
+   "note": "redirect_url returned by task.on_action (server-side), not from the form"
+  },
+  "wagtail-8.1|open-redirect|wagtail/api/v2/views.py:144|wagtail/api/v2/views.py:140": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "wagtail-8.1|open-redirect|wagtail/api/v3/routers/pages.py:293|wagtail/api/querysets.py:31": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "wagtail-8.1|open-redirect|wagtail/contrib/redirects/api/v3/router.py:139|wagtail/contrib/redirects/api/v3/router.py:136": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  }
+ }
+}

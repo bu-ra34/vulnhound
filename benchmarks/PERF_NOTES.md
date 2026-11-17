@@ -146,3 +146,28 @@ Remaining false-positive classes:
    treated as a guard on the returned value.
 4. Guards whose result is reassigned (`path = validate_path_is_safe(path)`)
    followed by helper calls still produce a finding in mlflow.
+
+## Precision benchmark (benchmarks/precision.py)
+
+`python benchmarks/precision.py CORPUS_DIR [LABELS.json] [--json OUT] [--strict] [NAME ...]`
+runs the engine with CLI defaults (grouped, tests excluded) over every project in
+CORPUS_DIR and matches group representatives to `benchmarks/precision_labels.json`
+by key `project|rule|sink_path:line|source_path:line`. It prints per project
+findings / tp / fp / unclear / UNLABELED, then overall precision = tp/(tp+fp),
+and lists unlabeled findings with their keys (triage these and add labels).
+`--strict` exits 1 if any finding is unlabeled. Labels no longer reported are
+counted as stale. Corpus: the 8 earlier projects plus django-cms 5.1.3, flaskbb
+3.0.0, gradio 6.32.0, jupyter-server 2.21.1, nautobot 3.2.9, netbox 4.7.5,
+pretalx 2026.2.1, saleor 2.10.1, streamlit 1.67.0 (PyPI sdists, .py only).
+
+Baseline (17 projects, engine as of Round 2): 67 findings; 1 tp, 65 fp, 1 unclear;
+precision 1/66 = 0.015. fp categories: same-host-redirect 32, guarded 26,
+db-lookup 3, wrong-sink-semantics 2, not-attacker-source 2. The 16 original
+findings: 0 tp / 15 fp / 1 unclear (the manager's two other unclear items,
+label-studio storage-URI redirect and mlflow scorer deserialization, are fp:
+bucket-gated presign redirect; guardrail rejects custom-code scorers and the
+server never exec()s). Only tp: one gradio path-traversal finding (details withheld pending responsible disclosure).
+
+Note: true-positive labels for issues not yet publicly disclosed are kept out of
+this repository until the maintainers have been notified. `precision.py` reports
+such findings as UNLABELED.
