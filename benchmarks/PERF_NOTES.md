@@ -125,3 +125,24 @@ Actionable for the engine (not changed here):
   source line is inside `get_redirect_target`/`get_valid_next_url...`, the helper is the sanitizer).
 - Slice elision (`…`) hid the actual guard in #3; keep calls to `validate_*`/`check_*` lines of
   the path function and show `if` guards that dominate the sink.
+
+## Round 2 results (validators/guards, grouping, test exclusion)
+
+Same 8 projects, CLI defaults. Total findings fell from about 200 to 16
+(superset 3, flask-admin 2, label-studio 2, mlflow 4, wagtail 5, others 0).
+
+Manual triage of all 16 slices: 0 true positives, 13 false positives, 3 unclear
+(label-studio storage-URI redirect, mlflow scorer deserialization, mlflow
+skills install `custom_path`; the last is behind a deny-remote-access policy).
+
+Remaining false-positive classes:
+1. Open redirect to a same-host URL: `request.path`, `request.url` reduced to
+   path+query, or `reverse(...) + "?" + query`. Only attacker control over the
+   start of the URL (scheme/host) should count.
+2. Taint through database lookups: a request id used to fetch an object
+   (`DAO.find_by_id(id)`, `GridFS.get(...)`), whose stored content then reaches
+   a sink. Values loaded by id are not attacker-supplied content.
+3. Positive-branch guards: `if x and is_safe_url(x): return x` is not yet
+   treated as a guard on the returned value.
+4. Guards whose result is reassigned (`path = validate_path_is_safe(path)`)
+   followed by helper calls still produce a finding in mlflow.
