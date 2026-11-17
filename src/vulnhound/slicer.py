@@ -9,6 +9,7 @@ around the sink. Never whole files.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,7 @@ from .models import Finding, Location
 from .store import load_findings
 
 _MAX_COL = 200
+_EXPECT_RE = re.compile(r"\s*#\s*VH-EXPECT:.*$")
 _MAX_STMT_LINES = 6
 _FUNC = (ast.FunctionDef, ast.AsyncFunctionDef)
 _BODY_FIELDS = ("body", "orelse", "finalbody", "handlers", "cases")
@@ -187,7 +189,7 @@ def build_slice(
             for f in index.functions.values()
             if f.location.path == loc.path and f.location.line <= loc.line <= f.end_line
         ]
-        fi = max(cands, key=lambda f: f.location.line, default=None)
+        fi = max(cands, key=lambda f: (f.location.line, -f.end_line), default=None)
         key = (loc.path, fi.qualname if fi else "<module>")
         g = groups.setdefault(key, _Group(loc.path, key[1], i))
         if key not in fn_nodes:
@@ -289,7 +291,7 @@ def build_slice(
                     if any(src[k - 1].strip() for k in range(prev + 1, ln)):
                         out.append("   …")
                 prev = ln
-                text = src[ln - 1].rstrip()
+                text = _EXPECT_RE.sub("", src[ln - 1]).rstrip()
                 if len(text) > _MAX_COL:
                     text = text[: _MAX_COL - 1] + "…"
                 mark = ""

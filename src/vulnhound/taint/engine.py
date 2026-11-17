@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import deque
 from dataclasses import dataclass, replace
 
 from vulnhound.index import ProjectIndex
@@ -107,6 +108,16 @@ class Hit:
     via: str = ""  # first project function hop name, for messages
 
 
+def _tsig(t: Taint) -> tuple:
+    return (t.src.loc if t.src else None, tuple(sorted(t.san)), t.built)
+
+
+def _same(a: Taint | None, b: Taint | None) -> bool:
+    if a is None or b is None:
+        return a is b
+    return a is b or (_tsig(a) == _tsig(b) and a.params == b.params)
+
+
 def _score(t: Taint) -> int:
     if t.src is None:
         return 0
@@ -161,11 +172,13 @@ def _collect_nodes(tree: ast.Module, module: str) -> dict[str, ast.AST]:
 
 
 class _Summary:
-    __slots__ = ("psinks", "pret", "ret_src", "sig")
+    __slots__ = ("pfield", "psinks", "pret", "pret_step", "ret_src", "sig")
 
     def __init__(self) -> None:
         self.psinks: dict[str, list[Hit]] = {}
         self.pret: dict[str, tuple[frozenset, bool]] = {}
+        self.pret_step: dict[str, tuple] = {}
+        self.pfield: dict[str, dict[str, tuple[frozenset, bool]]] = {}
         self.ret_src: Taint | None = None
         self.sig: object = None
 
@@ -183,6 +196,14 @@ class Engine:
         self._rcache: dict[tuple, str] = {}
         self._modinfo: dict[str, tuple[dict[str, str], dict[str, str]]] = {}
         self._pos_params: dict[str, list[str]] = {}
+        self.pending: deque[str] = deque()
+        self.queued: set[str] = set()
+        self.counts: dict[str, int] = {}
+        self.fields: dict[tuple[str, str], Taint] = {}
+        self.field_readers: dict[tuple[str, str], set[str]] = {}
+        self.exports: dict[str, tuple[dict[str, Taint], object]] = {}
+        self.children: dict[str, list[str]] = {}
+        self._outer: dict[str, list[str]] = {}
 
     # -- setup --------------------------------------------------------------
     def load(self) -> None:
@@ -197,6 +218,48 @@ class Engine:
                 if q in self.ix.functions:
                     self.nodes[q] = n
                     self.node_module[q] = m
+        for q, m in self.node_module.items():
+            if q.endswith(".<module>"):
+                continue
+            parent = q.rsplit(".<locals>.", 1)[0] if ".<locals>." in q else f"{m}.<module>"
+            self.children.setdefault(parent, []).append(q)
+
+    def enqueue(self, q: str) -> None:
+        if q in self.nodes and q not in self.queued and self.counts.get(q, 0) < MAX_REANALYSIS:
+            self.queued.add(q)
+            self.pending.append(q)
+
+    def write_field(self, cls: str, attr: str, t: Taint) -> None:
+        if t.src is None:
+            return
+        t = replace(t, params=frozenset())
+        key = (cls, attr)
+        old = self.fields.get(key)
+        new = tmerge(old, t)
+        assert new is not None
+        if old is not None and _tsig(old) == _tsig(new):
+            return
+        self.fields[key] = new
+        for r in self.field_readers.get(key, ()):
+            self.enqueue(r)
+
+    def read_field(self, cls: str, attr: str, reader: str) -> Taint | None:
+        key = (cls, attr)
+        self.field_readers.setdefault(key, set()).add(reader)
+        return self.fields.get(key)
+
+    def outer_chain(self, q: str) -> list[str]:
+        """Enclosing scopes of q, innermost first, ending at the module scope."""
+        r = self._outer.get(q)
+        if r is None:
+            r = []
+            cur = q
+            while ".<locals>." in cur:
+                cur = cur.rsplit(".<locals>.", 1)[0]
+                r.append(cur)
+            r.append(f"{self.node_module[q]}.<module>")
+            self._outer[q] = r
+        return r
 
     def resolve(self, module: str, qual: str, dotted: str) -> str:
         key = (module, qual, dotted)
@@ -262,20 +325,17 @@ class Engine:
     # -- driver -------------------------------------------------------------
     def run(self) -> list[Finding]:
         self.load()
-        order = list(self.nodes)
-        counts: dict[str, int] = {}
-        pending = list(order)
-        queued = set(pending)
-        while pending:
-            q = pending.pop(0)
-            queued.discard(q)
+        self.pending = deque(self.nodes)
+        self.queued = set(self.pending)
+        counts = self.counts
+        while self.pending:
+            q = self.pending.popleft()
+            self.queued.discard(q)
             counts[q] = counts.get(q, 0) + 1
             changed = self.analyze_function(q)
             if changed:
                 for c in self.ix.callers(q):
-                    if c in self.nodes and c not in queued and counts.get(c, 0) < MAX_REANALYSIS:
-                        queued.add(c)
-                        pending.append(c)
+                    self.enqueue(c)
         out: dict[str, Finding] = {}
         for fs in self.fn_findings.values():
             for f in fs:
@@ -283,6 +343,28 @@ class Engine:
                 if old is None or f.confidence > old.confidence:
                     out[f.id] = f
         return sorted(out.values(), key=lambda f: (f.sink.path, f.sink.line, f.rule, f.id))
+
+    def update_exports(self, q: str, env: dict[str, Taint]) -> None:
+        """Publish source-tainted plain names of q's scope for closures and module globals."""
+        is_mod = q.endswith(".<module>")
+        deps = self.children.get(q)
+        if not deps:
+            return
+        exp = {
+            k: replace(v, params=frozenset())
+            for k, v in env.items()
+            if v.src is not None and "." not in k
+        }
+        sig = frozenset((k, *_tsig(v)) for k, v in exp.items())
+        old = self.exports.get(q)
+        if (old[1] if old else frozenset()) == sig:
+            return
+        self.exports[q] = (exp, sig)
+        if is_mod:
+            m = self.node_module[q]
+            deps = [d for d in self.nodes if self.node_module[d] == m and d != q]
+        for d in deps:
+            self.enqueue(d)
 
     def analyze_function(self, q: str) -> bool:
         fa = _FuncAnalyzer(self, q)
@@ -292,6 +374,7 @@ class Engine:
             self.fn_findings[q] = []
             return False
         self.fn_findings[q] = fa.findings
+        self.update_exports(q, fa.env)
         s = fa.summary()
         old = self.summ.get(q)
         if old is not None and old.sig == s.sig:
@@ -319,6 +402,11 @@ class _FuncAnalyzer:
         self.findings: list[Finding] = []
         self.psinks: dict[str, list[Hit]] = {}
         self.ret: Taint | None = None
+        self.pret_step: dict[str, tuple] = {}
+        self.ret_src_step: Step | None = None
+        self.pfield: dict[str, dict[str, tuple[frozenset, bool]]] = {}
+        self.recv: str | None = None
+        self.cls: str | None = None
         self.mtypes, self.mkinds = eng.modinfo(self.module)
 
     # -- helpers ------------------------------------------------------------
@@ -353,6 +441,12 @@ class _FuncAnalyzer:
         node = self.node
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             self.init_params(node)
+            fi = self.ix.functions[self.qual]
+            a = node.args
+            allargs = a.posonlyargs + a.args
+            if fi.is_method and "staticmethod" not in fi.decorators and allargs:
+                self.recv = allargs[0].arg
+                self.cls = self.qual.rsplit(".", 1)[0]
             self.block(node.body)
         else:
             self.block(node.body)  # type: ignore[attr-defined]
@@ -360,11 +454,16 @@ class _FuncAnalyzer:
     def summary(self) -> _Summary:
         s = _Summary()
         s.psinks = self.psinks
+        s.pfield = self.pfield
+        s.pret_step = self.pret_step
         if self.ret is not None:
             for p in self.ret.params:
                 s.pret[p] = (self.ret.san, self.ret.built)
             if self.ret.src is not None:
-                s.ret_src = replace(self.ret, params=frozenset())
+                rs = replace(self.ret, params=frozenset())
+                if self.ret_src_step is not None:
+                    rs = _add_step(rs, self.ret_src_step)
+                s.ret_src = rs
         s.sig = (
             frozenset(
                 (p, h.rule, h.sink.path, h.sink.line, h.needs_built)
@@ -372,6 +471,9 @@ class _FuncAnalyzer:
                 for h in hs
             ),
             frozenset((p, tuple(sorted(v[0])), v[1]) for p, v in s.pret.items()),
+            frozenset(
+                (p, a, tuple(sorted(v[0])), v[1]) for p, d in s.pfield.items() for a, v in d.items()
+            ),
             None
             if s.ret_src is None
             else (s.ret_src.src.loc, tuple(sorted(s.ret_src.san)), s.ret_src.built),  # type: ignore[union-attr]
@@ -541,27 +643,21 @@ class _FuncAnalyzer:
             self.bind(s.target, new, s, s.value)  # type: ignore[attr-defined]
         elif t is ast.Return:
             if s.value is not None:  # type: ignore[attr-defined]
-                self.ret = tmerge(self.ret, self.ev(s.value))  # type: ignore[attr-defined]
+                rv = self.ev(s.value)  # type: ignore[attr-defined]
+                if rv is not None:
+                    rstep = self.step(self.loc(s), "returns tainted value")
+                    for p in rv.params:
+                        self.pret_step.setdefault(p, (*rv.steps, rstep))
+                    if rv.src is not None and self.ret_src_step is None:
+                        self.ret_src_step = rstep
+                self.ret = tmerge(self.ret, rv)
         elif t is ast.If:
             self.ev(s.test)  # type: ignore[attr-defined]
             e1 = self.branch(s.body)  # type: ignore[attr-defined]
             e2 = self.branch(s.orelse)  # type: ignore[attr-defined]
             self.env = self.merge_env(e1, e2)
-        elif t is ast.For or t is ast.AsyncFor:
-            it = self.ev(s.iter)  # type: ignore[attr-defined]
-            saved = self.env
-            self.env = dict(saved)
-            self.bind(s.target, it, s.iter, s.iter)  # type: ignore[attr-defined]
-            self.block(s.body)  # type: ignore[attr-defined]
-            e1 = self.env
-            self.env = saved
-            self.env = self.merge_env(saved, e1)
-            self.block(s.orelse)  # type: ignore[attr-defined]
-        elif t is ast.While:
-            self.ev(s.test)  # type: ignore[attr-defined]
-            e1 = self.branch(s.body)  # type: ignore[attr-defined]
-            self.env = self.merge_env(self.env, e1)
-            self.block(s.orelse)  # type: ignore[attr-defined]
+        elif t is ast.For or t is ast.AsyncFor or t is ast.While:
+            self.loop(s)  # type: ignore[arg-type]
         elif t is ast.With or t is ast.AsyncWith:
             for item in s.items:  # type: ignore[attr-defined]
                 v = self.ev(item.context_expr)
@@ -602,6 +698,30 @@ class _FuncAnalyzer:
             if not self.in_function:
                 self.block(s.body)  # type: ignore[attr-defined]
         # FunctionDef / Import / Pass / Global ...: nothing (nested defs are own functions)
+
+    def loop(self, s: ast.For | ast.AsyncFor | ast.While) -> None:
+        """Walk the body, re-walking (up to _LOOP_PASSES) while loop-carried taint changes."""
+        is_for = not isinstance(s, ast.While)
+        it = self.ev(s.iter) if is_for else None  # type: ignore[union-attr]
+        saved = self.env
+        entry = saved
+        carried = _loop_carried(s)
+        passes = _LOOP_PASSES if carried else 1
+        out = saved
+        for _ in range(passes):
+            self.env = dict(entry)
+            if is_for:
+                self.bind(s.target, it, s.iter, s.iter)  # type: ignore[union-attr]
+            else:
+                self.ev(s.test)  # type: ignore[union-attr]
+            self.block(s.body)
+            out = self.env
+            nxt = self.merge_env(saved, out)
+            if all(_same(entry.get(k), nxt.get(k)) for k in carried):
+                break
+            entry = nxt
+        self.env = self.merge_env(saved, out)
+        self.block(s.orelse)
 
     @property
     def in_function(self) -> bool:
@@ -650,7 +770,12 @@ class _FuncAnalyzer:
                 if t is None:
                     self.env.pop(key, None)
                 else:
-                    self.env[key] = self.with_step(t, self.loc(at), f"assigned to {key}")
+                    t = self.with_step(t, self.loc(at), f"assigned to {key}")
+                    self.env[key] = t
+                    if self.recv is not None and key.startswith(self.recv + "."):
+                        attr = key[len(self.recv) + 1 :]
+                        if "." not in attr:
+                            self.field_write(attr, t)
         elif tt is ast.Subscript:
             base = target.value  # type: ignore[attr-defined]
             if isinstance(base, ast.Name) and t is not None:
@@ -658,6 +783,24 @@ class _FuncAnalyzer:
             self.ev(target.slice)  # type: ignore[attr-defined]
         elif tt is ast.Starred:
             self.bind(target.value, t, at, valnode)  # type: ignore[attr-defined]
+
+    def field_write(self, attr: str, t: Taint) -> None:
+        assert self.cls is not None
+        self.eng.write_field(self.cls, attr, t)
+        for p in t.params:
+            self.pfield.setdefault(p, {})[attr] = (t.san, t.built)
+
+    def outer_taint(self, name: str, n: ast.AST) -> Taint | None:
+        """Source-tainted closure variable or module global visible from this function."""
+        eng = self.eng
+        for scope in eng.outer_chain(self.qual):
+            ex = eng.exports.get(scope)
+            if ex is not None:
+                t = ex[0].get(name)
+                if t is not None:
+                    kind = "global" if scope.endswith(".<module>") else "closure"
+                    return self.with_step(t, self.loc(n), f"{kind} variable {name}")
+        return None
 
     # -- expressions --------------------------------------------------------
     def ev(self, n: ast.AST | None) -> Taint | None:
@@ -669,6 +812,10 @@ class _FuncAnalyzer:
         if t is ast.Name:
             r = self.env.get(n.id)  # type: ignore[attr-defined]
             if r is None and n.id not in self.bound and n.id not in self.reqnames:  # type: ignore[attr-defined]
+                if self.in_function:
+                    o = self.outer_taint(n.id, n)  # type: ignore[attr-defined]
+                    if o is not None:
+                        return o
                 return self.chain_source(n)
             return r
         if t is ast.Attribute:
@@ -677,6 +824,13 @@ class _FuncAnalyzer:
                 hit = self.env.get(key)
                 if hit is not None:
                     return hit
+                if self.recv is not None and key.startswith(self.recv + "."):
+                    attr = key[len(self.recv) + 1 :]
+                    if "." not in attr:
+                        assert self.cls is not None
+                        ft = self.eng.read_field(self.cls, attr, self.qual)
+                        if ft is not None:
+                            return self.with_step(ft, self.loc(n), f"read field {key}")
                 src = self.chain_source(n)
                 if src is not None:
                     return src
@@ -956,6 +1110,13 @@ class _FuncAnalyzer:
                     continue
                 h2 = replace(h, via=h.via or short)
                 self.apply_hit(t, h2, hop, interproc=True)
+        if summ.pfield and eng.ix.functions[resolved].is_method:
+            cls = resolved.rsplit(".", 1)[0]
+            for pname, t in mapping:
+                for attr, (san, built) in summ.pfield.get(pname, {}).items():
+                    if t.src is not None:
+                        ft = replace(t, san=t.san | san, built=t.built or built)
+                        eng.write_field(cls, attr, self.with_step(ft, at, f"stored in {attr}"))
         out = summ.ret_src
         for pname, t in mapping:
             r = summ.pret.get(pname)
@@ -963,11 +1124,53 @@ class _FuncAnalyzer:
                 continue
             san, built = r
             tt = replace(t, san=t.san | san, built=t.built or built)
+            rst = summ.pret_step.get(pname)
+            for st in rst or ():
+                tt = _add_step(tt, st)
             tt = self.with_step(tt, at, f"returned from {short}(...)")
             out = tmerge(out, tt)
         if out is not None and out is summ.ret_src:
             out = self.with_step(out, at, f"returned from {short}(...)")
         return out
+
+
+def _add_step(t: Taint, step: Step) -> Taint:
+    if len(t.steps) >= MAX_PATH - 2:
+        return t
+    if t.steps and t.steps[-1].location == step.location:
+        return t
+    return replace(t, steps=(*t.steps, step))
+
+
+_LOOP_PASSES = 4
+
+
+def _loop_carried(s: ast.AST) -> frozenset:
+    """True if the loop body reads something it also writes (taint may flow around the loop)."""
+    r = getattr(s, "_vh_carried", None)
+    if r is not None:
+        return r
+    stores: set[str] = set()
+    loads: set[str] = set()
+    parts = list(s.body) + list(getattr(s, "orelse", []))  # type: ignore[attr-defined]
+    if isinstance(s, ast.While):
+        parts.append(s.test)
+    for part in parts:
+        for n in ast.walk(part):
+            if isinstance(n, ast.Name):
+                (stores if isinstance(n.ctx, ast.Store) else loads).add(n.id)
+            elif isinstance(n, ast.Attribute):
+                key = _chain(n)
+                if _pure(key):
+                    (stores if isinstance(n.ctx, ast.Store) else loads).add(key)
+                if n.attr in _MUTATORS and isinstance(n.value, ast.Name):
+                    stores.add(n.value.id)
+            elif isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store):
+                if isinstance(n.value, ast.Name):
+                    stores.add(n.value.id)
+    r = frozenset(stores & loads)
+    s._vh_carried = r  # type: ignore[attr-defined]
+    return r
 
 
 def _cap(steps: tuple) -> tuple:

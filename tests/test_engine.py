@@ -376,3 +376,196 @@ def v():
 
 def test_clean_project_has_no_findings(tmp_path):
     assert run(tmp_path, {"a.py": "import os\nos.system('ls')\neval('1+1')\n"}) == []
+
+
+# ---- closures, globals, object fields, loops ----------------------------------
+
+
+def test_module_global_read_in_function(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "a.py": """
+import os, sys
+cmd = sys.argv[1]
+def go():
+    os.system(cmd)  # SINK
+"""
+        },
+    )
+    assert lines(fs) == marked(tmp_path, "a.py")
+    assert any("global variable cmd" in s.note for s in fs[0].path)
+
+
+def test_module_global_shadowed_or_sanitized_is_safe(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "a.py": """
+import os, sys, shlex
+cmd = sys.argv[1]
+safe = shlex.quote(sys.argv[2])
+def go(cmd):
+    os.system(cmd)
+def go2():
+    cmd = "ls"
+    os.system(cmd)
+def go3():
+    os.system(safe)
+"""
+        },
+    )
+    assert fs == []
+
+
+def test_closure_variable(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "a.py": FLASK
+            + """
+import os
+@app.route("/a")
+def a():
+    n = request.args["n"]
+    def inner():
+        os.system(n)  # SINK
+    inner()
+"""
+        },
+    )
+    assert lines(fs) == marked(tmp_path, "a.py")
+    assert any("closure variable n" in s.note for s in fs[0].path)
+
+
+def test_field_written_in_init_read_in_method(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "a.py": """
+import os, sys
+class R:
+    def __init__(self):
+        self.c = sys.argv[1]
+    def go(self):
+        os.system(self.c)  # SINK
+"""
+        },
+    )
+    assert lines(fs) == marked(tmp_path, "a.py")
+
+
+def test_field_written_by_setter_param_then_read(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "a.py": FLASK
+            + """
+import os
+class R:
+    def set(self, v):
+        self.v = v
+    def go(self):
+        os.system(self.v)  # SINK
+@app.route("/a")
+def a():
+    r = R()
+    r.set(request.args["x"])
+    r.go()
+"""
+        },
+    )
+    assert lines(fs) == marked(tmp_path, "a.py")
+
+
+def test_fields_are_per_attribute_and_class(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "a.py": """
+import os, sys
+class R:
+    def __init__(self):
+        self.bad = sys.argv[1]
+        self.ok = "ls"
+    def go(self):
+        os.system(self.ok)
+class S:
+    def go(self):
+        os.system(self.bad)
+"""
+        },
+    )
+    assert fs == []
+
+
+def test_loop_carried_taint_for(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "a.py": FLASK
+            + """
+import os
+@app.route("/a")
+def a():
+    prev = ""
+    cur = ""
+    for _ in range(3):
+        os.system(cur)  # SINK
+        cur = prev
+        prev = request.args["x"]
+"""
+        },
+    )
+    assert lines(fs) == marked(tmp_path, "a.py")
+
+
+def test_loop_carried_taint_while_and_clean_loop(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "a.py": FLASK
+            + """
+import os
+@app.route("/a")
+def a():
+    acc = ""
+    parts = request.args.getlist("p")
+    while parts:
+        acc = acc + parts.pop()
+    os.system(acc)  # SINK
+@app.route("/b")
+def b():
+    acc = ""
+    for p in ["x", "y"]:
+        acc = acc + p
+    os.system(acc)
+"""
+        },
+    )
+    assert lines(fs) == marked(tmp_path, "a.py")
+
+
+def test_return_hop_steps_recorded(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "s.py": """
+import os
+def _build(o):
+    return "x " + o  # RET
+def run(o):
+    c = _build(o)
+    os.popen(c)
+""",
+            "r.py": FLASK
+            + """
+from s import run
+@app.route("/a")
+def a():
+    run(request.args["o"])
+""",
+        },
+    )
+    assert len(fs) == 1
+    assert ("s.py", 4) in [(s.location.path, s.location.line) for s in fs[0].path]

@@ -98,3 +98,21 @@ def test_run_ok_and_errors(tmp_path, capsys):
     assert "unknown" in capsys.readouterr().err
     assert slicer.run(root, "VH-abc123") == 0
     assert "VH-abc123 sqli" in capsys.readouterr().out
+
+
+def test_slice_includes_helper_and_strips_expect(tmp_path):
+    from vulnhound.taint.engine import analyze
+
+    root = Path(__file__).parent / "fixtures" / "vuln"
+    index = build_index(root, use_cache=False)
+    (f,) = [x for x in analyze(index) if x.sink.path == "pkg_helpers/app.py"]
+    out = slicer.build_slice(index, f)
+    assert "def _normalize(text):" in out
+    assert 'return " ".join(parts)' in out
+    assert "def make_command(opts):" in out
+    assert 'return "convert " + cleaned' in out
+    assert "VH-EXPECT" not in out
+    (g,) = [x for x in analyze(index) if x.sink.path == "pkg_inter/shell.py"]
+    out = slicer.build_slice(index, g)
+    assert "def _build(opts):" in out and 'return "mytool " + opts' in out
+    assert "VH-EXPECT" not in out
