@@ -43,7 +43,7 @@ pip install vulnhound
 
 | Komut | Ne yapar |
 |---|---|
-| `vulnhound analyze [path] [--json] [--no-cache] [--min-severity S]` | Aday zafiyetleri bulur. Bulgu varsa çıkış kodu 1. |
+| `vulnhound analyze [path] [--json] [--no-cache] [--min-severity S]` | Aday zafiyetleri bulur. Bulgu varsa çıkış kodu 1. Aynı sink/yardımcıyı paylaşan bulgular gruplanır (`--no-group` hepsini listeler); tests/examples/docs dizinleri ve `test_*.py` `--include-tests` verilmedikçe atlanır; `--include-local-sources` yerel/CLI girdilerini kaynak sayar. |
 | `vulnhound slice <id>` | Bir bulgu için minimal kod parçası. |
 | `vulnhound prove <id> --poc FILE` | PoC'yi sandbox içinde çalıştırır. |
 | `vulnhound estimate [path] [--json]` | Tüm repoyu okumanın yaklaşık token maliyeti (bayt/4). |

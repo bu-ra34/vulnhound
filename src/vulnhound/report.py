@@ -57,14 +57,28 @@ def _compact(f: Finding) -> dict:
     return {k: v for k, v in d.items() if v not in (None, "", [], {})}
 
 
-def to_json(findings: list[Finding], meta: dict) -> str:
+def _compact_group(g) -> dict:
+    d = _compact(g.rep)
+    if g.count > 1:
+        d["n"] = g.count
+        d["also"] = g.also
+    return d
+
+
+def to_json(findings: list[Finding], meta: dict, grouped: bool = False) -> str:
     fs = _sorted(findings)
     doc = {
         "version": meta.get("version", ""),
         "root": meta.get("root", ""),
         "stats": _stats(fs),
-        "findings": [_compact(f) for f in fs],
     }
+    if grouped:
+        from vulnhound.group import group_findings
+
+        groups = group_findings(fs)
+        doc["findings"] = [_compact_group(g) for g in groups]
+    else:
+        doc["findings"] = [_compact(f) for f in fs]
     for k, v in meta.items():
         if k not in doc and v not in (None, "", [], {}):
             doc[k] = v

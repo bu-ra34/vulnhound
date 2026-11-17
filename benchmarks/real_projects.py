@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from vulnhound import report  # noqa: E402
+from vulnhound.group import group_findings  # noqa: E402
 from vulnhound.index import build_index  # noqa: E402
 from vulnhound.project import discover  # noqa: E402
 from vulnhound.slicer import build_slice  # noqa: E402
@@ -36,8 +37,8 @@ def project_root(d: Path) -> Path:
             return d
 
 
-def measure(root: Path, dump: Path | None, name: str) -> dict:
-    files = discover(root)
+def measure(root: Path, dump: Path | None, name: str, raw: bool = False) -> dict:
+    files = discover(root, include_tests=raw)
     sizes = {p.relative_to(root).as_posix(): p.stat().st_size for p in files}
     lines = 0
     for p in files:
@@ -47,10 +48,10 @@ def measure(root: Path, dump: Path | None, name: str) -> dict:
     shutil.rmtree(root / ".vulnhound", ignore_errors=True)
 
     t = time.perf_counter()
-    idx = build_index(root)
+    idx = build_index(root, include_tests=raw)
     cold = time.perf_counter() - t
     t = time.perf_counter()
-    idx = build_index(root)
+    idx = build_index(root, include_tests=raw)
     warm = time.perf_counter() - t
     t = time.perf_counter()
     findings = analyze(idx)
@@ -58,7 +59,10 @@ def measure(root: Path, dump: Path | None, name: str) -> dict:
     findings.sort(key=lambda f: (SEVS.index(f.severity.value), f.sink.path, f.sink.line))
 
     meta = {"version": "bench", "root": str(root)}
-    json_bytes = len(report.to_json(findings, meta).encode())
+    n_total = len(findings)
+    json_bytes = len(report.to_json(findings, meta, grouped=not raw).encode())
+    if not raw:  # CLI default: Claude slices one representative per group
+        findings = [g.rep for g in group_findings(findings)]
     t = time.perf_counter()
     slices, slice_errors = [], []
     for f in findings:
@@ -84,7 +88,8 @@ def measure(root: Path, dump: Path | None, name: str) -> dict:
         "functions": len(idx.functions), "naive_tokens": total_bytes // 4,
         "index_cold_s": round(cold, 2), "index_warm_s": round(warm, 2),
         "analyze_s": round(t_an, 2), "slice_all_s": round(t_sl, 2),
-        "findings": len(findings), "slice_errors": slice_errors, "by_severity": sev,
+        "findings": len(findings), "findings_total": n_total,
+        "slice_errors": slice_errors, "by_severity": sev,
         "json_bytes": json_bytes, "slice_bytes": slice_bytes,
         "claude_reads_tokens": reads // 4,
         "files_with_findings": len(touched), "touched_bytes": touched_bytes,
@@ -99,6 +104,7 @@ def main() -> int:
     ap.add_argument("root")
     ap.add_argument("names", nargs="*")
     ap.add_argument("--json", dest="json_out")
+    ap.add_argument("--raw", action="store_true", help="no grouping, include tests (old behaviour)")
     ap.add_argument("--dump", help="write findings+slices per project to this dir")
     a = ap.parse_args()
     base = Path(a.root).resolve()
@@ -109,7 +115,7 @@ def main() -> int:
            f"{'touch tok':>10}{'x repo':>8}{'x touch':>8}")  # fmt: skip
     print(hdr)
     for d in dirs:
-        r = measure(project_root(d), Path(a.dump) if a.dump else None, d.name)
+        r = measure(project_root(d), Path(a.dump) if a.dump else None, d.name, a.raw)
         rows.append(r)
         print(f"{r['project']:<24}{r['files']:>6}{r['lines']:>8}{r['functions']:>7}"
               f"{r['naive_tokens']:>10}{r['index_cold_s']:>7}{r['index_warm_s']:>7}"

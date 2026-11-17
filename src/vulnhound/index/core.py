@@ -95,12 +95,12 @@ class ProjectIndex:
         return self._resolver.resolve(module_name, dotted_name, cls, function)
 
 
-def build_index(root: Path, use_cache: bool = True) -> ProjectIndex:
+def build_index(root: Path, use_cache: bool = True, include_tests: bool = True) -> ProjectIndex:
     root = Path(root).resolve()
     idx = ProjectIndex(root)
     cache = Cache(root) if use_cache else None
     raw: dict[str, list[str]] = {}
-    for path in discover(root):
+    for path in discover(root, include_tests):
         try:
             data = path.read_bytes()
         except OSError:

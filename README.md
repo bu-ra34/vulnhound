@@ -43,7 +43,7 @@ pip install vulnhound
 
 | Command | What it does |
 |---|---|
-| `vulnhound analyze [path] [--json] [--no-cache] [--min-severity S]` | Find candidate vulnerabilities. Exit 1 if any. |
+| `vulnhound analyze [path] [--json] [--no-cache] [--min-severity S]` | Find candidate vulnerabilities. Exit 1 if any. Findings sharing a sink/helper are grouped (`--no-group` to list all); tests/examples/docs dirs and `test_*.py` are skipped unless `--include-tests`; `--include-local-sources` adds local/CLI inputs as sources. |
 | `vulnhound slice <id>` | Minimal code slice for one finding. |
 | `vulnhound prove <id> --poc FILE` | Run a PoC in a sandbox. |
 | `vulnhound estimate [path] [--json]` | Rough token cost (bytes/4) of reading the whole repo. |

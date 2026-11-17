@@ -141,3 +141,47 @@ def test_match_statement_does_not_crash(tmp_path):
     assert findings
     out = slicer.build_slice(index, findings[0])
     assert "os.system(cmd)" in out and "◀ sink" in out
+
+
+def test_guard_never_elided_and_marked(tmp_path):
+    from vulnhound.taint.engine import analyze
+
+    filler = "".join(f"    pad{i} = {i}\n" for i in range(120))
+    (tmp_path / "app.py").write_text(
+        "import os\n"
+        "from flask import Flask, request\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/x')\n"
+        "def x():\n"
+        "    sid = request.args['sid']\n"
+        "    validate_session_id(sid)\n" + filler + "    os.system('rm ' + sid)\n"
+    )
+    index = build_index(tmp_path, use_cache=False)
+    (f,) = analyze(index)
+    out = slicer.build_slice(index, f, max_lines=10)
+    assert "validate_session_id(sid)  ◀ guard?" in out
+    assert "pad60" not in out
+
+
+def test_guard_forms_detected(tmp_path):
+    from vulnhound.taint.engine import analyze
+
+    (tmp_path / "app.py").write_text(
+        "import os\n"
+        "from flask import Flask, request\n"
+        "app = Flask(__name__)\n"
+        "ALLOWED = {'a'}\n"
+        "@app.route('/x')\n"
+        "def x():\n"
+        "    p = request.args['p']\n"
+        "    if p in ALLOWED:\n"
+        "        pass\n"
+        "    if not p.startswith('/'):\n"
+        "        pass\n"
+        "    os.system(p)\n"
+    )
+    index = build_index(tmp_path, use_cache=False)
+    (f,) = analyze(index)
+    out = slicer.build_slice(index, f)
+    assert "if p in ALLOWED:  ◀ guard?" in out
+    assert "startswith('/'):  ◀ guard?" in out

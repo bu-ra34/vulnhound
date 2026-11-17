@@ -17,14 +17,31 @@ def _skip_dir(name: str) -> bool:
     return name in SKIP_DIRS or name.startswith(".") or name.endswith(".egg-info")
 
 
-def discover(root: Path) -> list[Path]:
-    """Return all ``.py`` files under *root* (sorted), skipping vendored/hidden dirs."""
+TEST_DIRS = frozenset({"tests", "test", "testing", "examples", "example", "docs", "benchmarks"})
+
+
+def _is_test_file(name: str) -> bool:
+    return name == "conftest.py" or name.startswith("test_") or name.endswith("_test.py")
+
+
+def discover(root: Path, include_tests: bool = True) -> list[Path]:
+    """Return all ``.py`` files under *root* (sorted), skipping vendored/hidden dirs.
+
+    With ``include_tests=False`` also skip test/example/docs directories *below* root
+    (never root itself or its ancestors) and ``test_*.py``, ``*_test.py``, ``conftest.py``.
+    """
     root = Path(root)
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if not _skip_dir(d))
+        dirnames[:] = sorted(
+            d for d in dirnames if not _skip_dir(d) and (include_tests or d not in TEST_DIRS)
+        )
         base = Path(dirpath)
-        found.extend(base / f for f in sorted(filenames) if f.endswith(".py"))
+        found.extend(
+            base / f
+            for f in sorted(filenames)
+            if f.endswith(".py") and (include_tests or not _is_test_file(f))
+        )
     return found
 
 

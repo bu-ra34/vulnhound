@@ -32,6 +32,7 @@ class _Group:
     first_step: int
     lines: dict[int, int] = field(default_factory=dict)  # lineno -> priority (0 = mandatory)
     step_lines: set[int] = field(default_factory=set)
+    guard_lines: set[int] = field(default_factory=set)
 
 
 def _sig_last(node: ast.AST) -> int:
@@ -95,6 +96,67 @@ def _targets(node: ast.stmt) -> set[str]:
             if isinstance(n, ast.Name):
                 out.add(n.id)
     return out
+
+
+_GUARD_CALL_RE = re.compile(
+    r"^(validate|check|ensure|verify|is_safe|is_valid|is_allowed|is_trusted|is_local)|"
+    r"(^|_)(validate|validator|sanitize|is_safe_url|url_has_allowed_host)",
+    re.I,
+)
+
+
+def _call_name(call: ast.Call) -> str:
+    f = call.func
+    return f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+
+
+def _guard_parts(node: ast.stmt) -> list[ast.AST]:
+    if isinstance(node, (ast.If, ast.While, ast.Assert)):
+        return [node.test]
+    if isinstance(node, (ast.Expr, ast.Assign, ast.AnnAssign, ast.Return)):
+        return [node]
+    return []
+
+
+def _is_guard(node: ast.stmt, names: set[str]) -> bool:
+    """A check on a tracked name: validate_*()/check_*()/ensure_*() call, ``.startswith``,
+    or ``in ALLOWED_*``, whose arguments/subject mention a tracked name."""
+    for part in _guard_parts(node):
+        for n in ast.walk(part):
+            if isinstance(n, ast.Call):
+                nm = _call_name(n)
+                if nm == "startswith" or _GUARD_CALL_RE.search(nm):
+                    used = {
+                        x.id
+                        for a in [*n.args, *[k.value for k in n.keywords]]
+                        for x in ast.walk(a)
+                        if isinstance(x, ast.Name)
+                    }
+                    if isinstance(n.func, ast.Attribute):
+                        used |= {x.id for x in ast.walk(n.func.value) if isinstance(x, ast.Name)}
+                    if used & names:
+                        return True
+            elif isinstance(n, ast.Compare) and any(
+                isinstance(o, (ast.In, ast.NotIn)) for o in n.ops
+            ):
+                comp = [
+                    x
+                    for c in n.comparators
+                    for x in ast.walk(c)
+                    if isinstance(x, (ast.Name, ast.Attribute))
+                ]
+                if any(
+                    re.search(
+                        r"allow|safe|valid|whitelist|trusted",
+                        getattr(c, "id", getattr(c, "attr", "")),
+                        re.I,
+                    )
+                    for c in comp
+                ):
+                    left = {x.id for x in ast.walk(n.left) if isinstance(x, ast.Name)}
+                    if left & names:
+                        return True
+    return False
 
 
 def _exits(node: ast.If) -> ast.stmt | None:
@@ -261,6 +323,13 @@ def build_slice(
                 a, b = _header_span(st)
                 for ln in range(a, b + 1):
                     g.lines.setdefault(ln, 1)
+        # guards on tracked names between source and sink: never elided, flagged for judging
+        for st in stmts:
+            if st.lineno <= last and _is_guard(st, names):
+                a, b = _header_span(st)
+                for ln in range(a, b + 1):
+                    g.lines[ln] = 0
+                g.guard_lines.add(st.lineno)
         if is_sink_grp:
             lo = fn.lineno if fn is not None else 1
             hi = (fn.end_lineno or sink_line) if fn is not None else len(lines_of[g.path])
@@ -301,6 +370,8 @@ def build_slice(
                     mark += "  ◀ source"
                 if (g.path, ln) == sink_key:
                     mark += "  ◀ sink"
+                if ln in g.guard_lines:
+                    mark += "  ◀ guard?"
                 out.append(f"{ln:>4}| {text}{mark}")
         return out
 
