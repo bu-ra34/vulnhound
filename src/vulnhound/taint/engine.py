@@ -5,6 +5,31 @@ taint that reaches a sink becomes a ``Hit`` in the function's summary
 (param -> sink). Callers that pass real (source) taint to such a parameter emit a
 finding whose sink is the real sink location. Taint reaching ``return`` produces
 param -> return and source -> return summaries.
+
+Guards and validators (they clear path-traversal / ssrf / open-redirect taint)
+------------------------------------------------------------------------------
+* Value-returning validator calls, matched on the last dotted name part:
+  ``validate_*``, ``*_validate``, ``sanitize*``/``sanitise*``, ``secure_filename``,
+  ``safe_*`` and ``*_safe_*`` (e.g. ``safe_join``).  The result is clean.
+* The same call used as a statement (``validate_x(v)``) cleans its Name/attribute
+  arguments for the rest of the scope.
+* Predicates in ``if``/``assert``/``and``/``or``/``not`` tests: ``is_safe*``, ``is_valid*``,
+  ``is_allowed*``, ``*allowed*``, ``url_has_allowed_host_and_scheme``, ``is_safe_url``;
+  ``X.startswith(...)`` (also ``abspath(v).startswith(base)``); ``os.path.commonpath([..v..]) ==
+  base``; ``urlparse(v).netloc``/``hostname`` compared with ``==``/``!=``/``in``/``not in``;
+  ``v in ALLOWLIST`` / ``v in (consts)``; ``".." in v`` (path-traversal only).  Variables are clean
+  on the branch where the predicate holds.  If the other branch always exits (return, raise,
+  ``abort``/``exit``), the code after the ``if`` only sees the clean branch.
+* Helper summaries: a project function that, at its top level, rejects a parameter by
+  raise/abort using one of the guards above (or calls a validator on it) marks that parameter
+  validated; callers then treat the argument variable as clean after the call.
+* Only plain names and dotted attribute chains are tracked (not ``request.args.get('x')``).
+
+Local sources (``sys.argv``, ``input()``, ``sys.stdin``, ``os.environ``, ``os.getenv``) are
+ignored unless ``analyze(..., include_local_sources=True)``.
+Framework sources: Flask/Django/FastAPI, Django REST Framework ``request.data`` /
+``request.query_params`` (also ``self.request.*`` in views), Tornado ``RequestHandler``
+(path args of get/post/..., ``self.get_argument`` & friends, ``self.request.body`` etc.).
 """
 
 from __future__ import annotations
@@ -17,6 +42,7 @@ from dataclasses import dataclass, replace
 from vulnhound.index import ProjectIndex
 from vulnhound.models import Finding, Location, Severity, Step
 from vulnhound.report import finding_id
+from vulnhound.taint import specs as _specs
 from vulnhound.taint.specs import (
     DJANGO_REQUEST_ATTRS,
     FASTAPI_APP_CLASSES,
@@ -45,9 +71,212 @@ _NO_PROPAGATE = frozenset(
 )  # fmt: skip
 _MUTATORS = frozenset({"append", "extend", "add", "insert", "update", "setdefault", "appendleft"})
 _PARAM_SRC_KINDS = frozenset({"django-request-param", "fastapi-param"})
-_REQ_ATTRS = DJANGO_REQUEST_ATTRS | {
+_DRF_ATTRS = frozenset(getattr(_specs, "DRF_REQUEST_ATTRS", ("data", "query_params")))
+_TORNADO_BASES = frozenset(
+    getattr(_specs, "TORNADO_HANDLER_BASES", ("tornado.web.RequestHandler",))
+)
+_TORNADO_ARG_METHODS = frozenset(
+    getattr(
+        _specs,
+        "TORNADO_ARG_METHODS",
+        ("get_argument", "get_arguments", "get_query_argument", "get_query_arguments",
+         "get_body_argument", "get_body_arguments"),
+    )
+)  # fmt: skip
+_TORNADO_HTTP = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
+_TORNADO_REQ_ATTRS = frozenset(
+    {"body", "arguments", "files", "query_arguments", "body_arguments", "query", "uri"}
+)
+_REQ_ATTRS = DJANGO_REQUEST_ATTRS | _DRF_ATTRS | {
     "query_params", "path_params", "url", "json", "body", "form", "get_json", "values", "args",
 }  # fmt: skip
+_LOCAL_KINDS = frozenset({"argv", "stdin", "env"})
+_GUARD_RULES = frozenset({"path-traversal", "ssrf", "open-redirect"})
+_PATH_ONLY = frozenset({"path-traversal"})
+_URL_RULES = frozenset({"ssrf", "open-redirect"})
+_NO_RULES: frozenset = frozenset()
+_VALIDATOR_PREFIX = ("validate_", "sanitize", "sanitise", "safe_", "check_safe", "ensure_safe",
+                     "assert_safe")  # fmt: skip
+_PREDICATE_RE = re.compile(
+    r"^(is|has)_(safe|valid|allowed|trusted|within|inside)|allowed|^verify_(path|url|host)"
+    r"|^check_(path|url|host|redirect)|_is_safe|_is_valid"
+)
+_VALIDATOR_EXCLUDE = frozenset({"safe_load", "safe_load_all", "safe_dump", "safe_dump_all"})
+_EXIT_CALLS = frozenset({"abort", "exit", "_exit", "sys.exit", "os._exit", "quit"})
+_PATH_NORMALIZERS = frozenset(
+    {"abspath", "realpath", "normpath", "resolve", "expanduser", "absolute", "join", "joinpath"}
+)
+_URL_PARSERS = frozenset({"urlparse", "urlsplit"})
+_KEY_PASSTHROUGH = (
+    _PATH_NORMALIZERS | _URL_PARSERS | {"str", "Path", "PurePath", "unquote", "lower"}
+)
+_SA_BUILDERS = frozenset({"insert", "select", "update", "delete"})
+_SA_BOUND = frozenset({"bindparam", "literal"})
+_SA_CHAIN = frozenset(
+    {"values", "where", "filter_by", "returning", "limit", "offset", "order_by", "group_by",
+     "having", "join", "outerjoin", "on_conflict_do_update", "on_conflict_do_nothing",
+     "on_duplicate_key_update", "execution_options", "options", "with_for_update", "distinct",
+     "select_from", "add_columns", "where_clause", "prefix_with"}
+)  # fmt: skip
+_SA_BIND_METHODS = frozenset({"bindparams", "params"})
+
+
+def _is_validator(last: str) -> bool:
+    if last in _VALIDATOR_EXCLUDE:
+        return False
+    return (
+        last.startswith(_VALIDATOR_PREFIX)
+        or last == "secure_filename"
+        or last == "validate"
+        or last.endswith("_validate")
+        or "_safe_" in last
+    )
+
+
+def _is_predicate(last: str) -> bool:
+    return _is_validator(last) or bool(_PREDICATE_RE.search(last))
+
+
+def _always_exits(stmts) -> bool:
+    """True if control never falls out of the end of *stmts* (return/raise/abort/exit)."""
+    for st in stmts:
+        t = type(st)
+        if t is ast.Return or t is ast.Raise:
+            return True
+        if t is ast.Expr and isinstance(st.value, ast.Call):  # type: ignore[attr-defined]
+            n = _chain(st.value.func)  # type: ignore[attr-defined]
+            if n in _EXIT_CALLS or n.rpartition(".")[2] in ("abort", "exit"):
+                return True
+        if t is ast.If and st.orelse and _always_exits(st.body) and _always_exits(st.orelse):  # type: ignore[attr-defined]
+            return True
+    return False
+
+
+def _raises(stmts) -> bool:
+    """Like _always_exits but only raise/abort count (a helper that rejects its input)."""
+    for st in stmts:
+        t = type(st)
+        if t is ast.Raise:
+            return True
+        if t is ast.Expr and isinstance(st.value, ast.Call):  # type: ignore[attr-defined]
+            n = _chain(st.value.func)  # type: ignore[attr-defined]
+            if n in _EXIT_CALLS or n.rpartition(".")[2] in ("abort", "exit"):
+                return True
+    return False
+
+
+def _keys_of(n: ast.AST) -> list[str]:
+    """Trackable variable keys (names / pure dotted chains) mentioned in an argument."""
+    if isinstance(n, ast.Starred):
+        n = n.value
+    if isinstance(n, (ast.Name, ast.Attribute)):
+        k = _chain(n)
+        return [k] if _pure(k) else _keys_of(n.value) if isinstance(n, ast.Attribute) else []
+    if isinstance(n, (ast.List, ast.Tuple, ast.Set)):
+        return [k for e in n.elts for k in _keys_of(e)]
+    if isinstance(n, ast.Call):
+        last = _chain(n.func).rpartition(".")[2]
+        if last in _KEY_PASSTHROUGH:
+            ks = [k for a in n.args for k in _keys_of(a)]
+            if isinstance(n.func, ast.Attribute):
+                ks += _keys_of(n.func.value)
+            return ks
+    if isinstance(n, ast.BinOp):
+        return _keys_of(n.left) + _keys_of(n.right)
+    return []
+
+
+def _merge_guard(a: dict, b: dict) -> dict:
+    out = dict(a)
+    for k, v in b.items():
+        out[k] = out.get(k, _NO_RULES) | v
+    return out
+
+
+def _isect_guard(a: dict, b: dict) -> dict:
+    return {k: a[k] & b[k] for k in a.keys() & b.keys() if a[k] & b[k]}
+
+
+def _is_const_container(n: ast.AST) -> bool:
+    if isinstance(n, (ast.Tuple, ast.List, ast.Set)):
+        return all(isinstance(e, ast.Constant) for e in n.elts)
+    if isinstance(n, (ast.Name, ast.Attribute)):
+        tail = _chain(n).rpartition(".")[2]
+        return tail.isupper() and len(tail) > 1
+    return False
+
+
+def guard_of(test: ast.AST) -> tuple[dict, dict]:
+    """(clean-if-true, clean-if-false) maps ``key -> rules`` for a branch condition."""
+    t = type(test)
+    if t is ast.UnaryOp and isinstance(test.op, ast.Not):  # type: ignore[attr-defined]
+        a, b = guard_of(test.operand)  # type: ignore[attr-defined]
+        return b, a
+    if t is ast.BoolOp:
+        parts = [guard_of(v) for v in test.values]  # type: ignore[attr-defined]
+        if isinstance(test.op, ast.And):  # type: ignore[attr-defined]
+            tr: dict = {}
+            fa: dict = parts[0][1]
+            for p in parts:
+                tr = _merge_guard(tr, p[0])
+            for p in parts[1:]:
+                fa = _isect_guard(fa, p[1])
+            return tr, fa
+        fa = {}
+        tr = parts[0][0]
+        for p in parts:
+            fa = _merge_guard(fa, p[1])
+        for p in parts[1:]:
+            tr = _isect_guard(tr, p[0])
+        return tr, fa
+    if t is ast.Call:
+        func = test.func  # type: ignore[attr-defined]
+        last = _chain(func).rpartition(".")[2]
+        if last == "startswith" and isinstance(func, ast.Attribute):
+            keys = _keys_of(func.value)
+            return {k: _GUARD_RULES for k in keys}, {}
+        if _is_predicate(last):
+            keys = [k for a in test.args for k in _keys_of(a)]  # type: ignore[attr-defined]
+            keys += [k for kw in test.keywords for k in _keys_of(kw.value)]  # type: ignore[attr-defined]
+            return {k: _GUARD_RULES for k in keys}, {}
+        return {}, {}
+    if t is ast.Compare and len(test.ops) == 1:  # type: ignore[attr-defined]
+        op, left, right = test.ops[0], test.left, test.comparators[0]  # type: ignore[attr-defined]
+        pos = isinstance(op, (ast.Eq, ast.In, ast.Is))
+        neg = isinstance(op, (ast.NotEq, ast.NotIn, ast.IsNot))
+        if not (pos or neg):
+            return {}, {}
+        keys: list[str] = []
+        rules = _NO_RULES
+        for side in (left, right):
+            if isinstance(side, ast.Attribute) and side.attr in ("netloc", "hostname", "host"):
+                v = side.value
+                if isinstance(v, ast.Call) and _chain(v.func).rpartition(".")[2] in _URL_PARSERS:
+                    keys += [k for a in v.args for k in _keys_of(a)]
+                else:
+                    keys += _keys_of(v)
+                rules = _URL_RULES
+            elif isinstance(side, ast.Call) and _chain(side.func).endswith("commonpath"):
+                keys += [k for a in side.args for k in _keys_of(a)]
+                rules = _GUARD_RULES
+        if not keys and isinstance(op, (ast.In, ast.NotIn)):
+            if isinstance(left, ast.Constant) and isinstance(left.value, str) and left.value in (
+                "..", "../", "/..", "\\", "\\..",
+            ):  # fmt: skip
+                # ".." in v: true means dirty, false means clean
+                ks = _keys_of(right)
+                good = {k: _PATH_ONLY for k in ks}
+                return ({}, good) if isinstance(op, ast.In) else (good, {})
+            if _is_const_container(right):
+                keys = _keys_of(left)
+                rules = _GUARD_RULES
+        if not keys:
+            return {}, {}
+        good = {k: rules for k in keys}
+        return (good, {}) if pos else ({}, good)
+    return {}, {}
+
+
 _SCALARS = frozenset(
     {"int", "float", "bool", "UUID", "date", "datetime", "time", "timedelta", "Decimal",
      "Request", "Response", "BackgroundTasks", "HTTPConnection", "WebSocket", "Literal",
@@ -84,6 +313,7 @@ class Src:
     loc: Location
     label: str
     weak: bool = False
+    local: bool = False  # sys.argv / stdin / environment: not attacker-controlled for a web app
 
 
 @dataclass(frozen=True)
@@ -121,7 +351,9 @@ def _same(a: Taint | None, b: Taint | None) -> bool:
 def _score(t: Taint) -> int:
     if t.src is None:
         return 0
-    return 1 if t.src.weak else 2
+    if t.src.local:
+        return 1
+    return 2 if t.src.weak else 3
 
 
 def tmerge(a: Taint | None, b: Taint | None) -> Taint | None:
@@ -172,9 +404,10 @@ def _collect_nodes(tree: ast.Module, module: str) -> dict[str, ast.AST]:
 
 
 class _Summary:
-    __slots__ = ("pfield", "psinks", "pret", "pret_step", "ret_src", "sig")
+    __slots__ = ("pfield", "pguard", "psinks", "pret", "pret_step", "ret_src", "sig")
 
     def __init__(self) -> None:
+        self.pguard: dict[str, frozenset] = {}
         self.psinks: dict[str, list[Hit]] = {}
         self.pret: dict[str, tuple[frozenset, bool]] = {}
         self.pret_step: dict[str, tuple] = {}
@@ -187,8 +420,10 @@ class _Summary:
 
 
 class Engine:
-    def __init__(self, index: ProjectIndex) -> None:
+    def __init__(self, index: ProjectIndex, include_local_sources: bool = False) -> None:
         self.ix = index
+        self.include_local = include_local_sources
+        self._tornado: dict[str, bool] = {}
         self.nodes: dict[str, ast.AST] = {}
         self.node_module: dict[str, str] = {}
         self.summ: dict[str, _Summary] = {}
@@ -307,6 +542,32 @@ class Engine:
         self._modinfo[module] = (types, kinds)
         return types, kinds
 
+    def is_tornado_handler(self, cls: str, _depth: int = 0) -> bool:
+        """Class (qualname) derives, directly or via project classes, from a Tornado handler."""
+        r = self._tornado.get(cls)
+        if r is not None:
+            return r
+        self._tornado[cls] = False  # cycle guard
+        info = self.ix._classes.get(cls)
+        r = False
+        if info is not None and _depth < 8:
+            module, bases = info
+            for b in bases:
+                try:
+                    full = self.ix.resolve(module, b)
+                except Exception:
+                    full = b
+                if full in _TORNADO_BASES or (
+                    full.startswith("tornado.") and full.endswith("RequestHandler")
+                ):
+                    r = True
+                    break
+                if full in self.ix._classes and self.is_tornado_handler(full, _depth + 1):
+                    r = True
+                    break
+        self._tornado[cls] = r
+        return r
+
     def pos_params(self, q: str) -> list[str]:
         r = self._pos_params.get(q)
         if r is None:
@@ -407,6 +668,10 @@ class _FuncAnalyzer:
         self.pfield: dict[str, dict[str, tuple[frozenset, bool]]] = {}
         self.recv: str | None = None
         self.cls: str | None = None
+        self.pguard: dict[str, frozenset] = {}
+        self.alias: dict[str, list[str]] = {}
+        self.pnames: set[str] = set()
+        self.top_ids: set[int] = set()
         self.mtypes, self.mkinds = eng.modinfo(self.module)
 
     # -- helpers ------------------------------------------------------------
@@ -439,6 +704,7 @@ class _FuncAnalyzer:
     # -- entry --------------------------------------------------------------
     def run(self) -> None:
         node = self.node
+        self.top_ids = {id(x) for x in getattr(node, "body", ())}
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             self.init_params(node)
             fi = self.ix.functions[self.qual]
@@ -455,6 +721,7 @@ class _FuncAnalyzer:
         s = _Summary()
         s.psinks = self.psinks
         s.pfield = self.pfield
+        s.pguard = self.pguard
         s.pret_step = self.pret_step
         if self.ret is not None:
             for p in self.ret.params:
@@ -474,6 +741,7 @@ class _FuncAnalyzer:
             frozenset(
                 (p, a, tuple(sorted(v[0])), v[1]) for p, d in s.pfield.items() for a, v in d.items()
             ),
+            frozenset((p, tuple(sorted(r))) for p, r in s.pguard.items()),
             None
             if s.ret_src is None
             else (s.ret_src.src.loc, tuple(sorted(s.ret_src.san)), s.ret_src.built),  # type: ignore[union-attr]
@@ -525,9 +793,18 @@ class _FuncAnalyzer:
         extra = [x for x in (a.vararg, a.kwarg) if x is not None]
         names = [x.arg for x in allargs + extra]
         self.bound.update(names)
+        self.pnames.update(names)
         kind, url = self.route_kind(fn)
         fi = self.ix.functions[self.qual]
         skip_first = fi.is_method and "staticmethod" not in fi.decorators and bool(allargs)
+        if (
+            skip_first
+            and fn.name in _TORNADO_HTTP
+            and self.eng.is_tornado_handler(self.qual.rsplit(".", 1)[0])
+        ):
+            for arg in allargs[1:]:
+                self.set_source_param(arg, "Tornado path argument")
+            return
         if kind == "flask":
             conv = {m.group(2): (m.group(1) or "") for m in _CONV_RE.finditer(url)}
             for arg in allargs:
@@ -574,6 +851,16 @@ class _FuncAnalyzer:
         if not _pure(s):
             return None
         head, _, rest = s.partition(".")
+        if self.recv is not None and head == self.recv and rest:
+            r0, _, r1 = rest.partition(".")
+            if r0 == "request" and r1.partition(".")[0] in _REQ_ATTRS | _TORNADO_REQ_ATTRS:
+                return self.mk_src(node, f"self.request.{r1.partition('.')[0]}", False)
+            if (
+                r0 in _TORNADO_ARG_METHODS
+                and self.cls is not None
+                and self.eng.is_tornado_handler(self.cls)
+            ):
+                return self.mk_src(node, f"self.{r0}", False)
         if not rest:
             if head in self.reqnames or head in self.env:
                 return None
@@ -581,7 +868,9 @@ class _FuncAnalyzer:
             src = match_source(full) if full != s or head == "input" else None
             if src is None or src.kind in _PARAM_SRC_KINDS:
                 return None
-            return self.mk_src(node, src.pattern, src.weak)
+            if src.kind in _LOCAL_KINDS and not self.eng.include_local:
+                return None
+            return self.mk_src(node, src.pattern, src.weak, src.kind in _LOCAL_KINDS)
         if head in self.reqnames:
             if rest.partition(".")[0] in _REQ_ATTRS:
                 return self.mk_src(node, f"request.{rest.partition('.')[0]}", False)
@@ -592,16 +881,18 @@ class _FuncAnalyzer:
         src = match_source(full)
         if src is None or src.kind in _PARAM_SRC_KINDS:
             return None
-        return self.mk_src(node, src.pattern, src.weak)
+        if src.kind in _LOCAL_KINDS and not self.eng.include_local:
+            return None
+        return self.mk_src(node, src.pattern, src.weak, src.kind in _LOCAL_KINDS)
 
-    def mk_src(self, node: ast.AST, label: str, weak: bool) -> Taint:
+    def mk_src(self, node: ast.AST, label: str, weak: bool, local: bool = False) -> Taint:
         for pre in ("flask.", "django.http.HttpRequest."):
             if label.startswith(pre):
                 label = label[len(pre) :]
                 if pre.startswith("django"):
                     label = "request." + label
         loc = self.loc(node)
-        return Taint(Src(loc, label, weak), frozenset(), frozenset(), False,
+        return Taint(Src(loc, label, weak, local), frozenset(), frozenset(), False,
                      (self.step(loc, f"source: {label}"),))  # fmt: skip
 
     # -- statements ---------------------------------------------------------
@@ -629,6 +920,7 @@ class _FuncAnalyzer:
         t = type(s)
         if t is ast.Expr:
             self.ev(s.value)  # type: ignore[attr-defined]
+            self.validator_stmt(s)  # type: ignore[arg-type]
         elif t is ast.Assign:
             self.assign(s)  # type: ignore[arg-type]
         elif t is ast.AnnAssign:
@@ -652,10 +944,7 @@ class _FuncAnalyzer:
                         self.ret_src_step = rstep
                 self.ret = tmerge(self.ret, rv)
         elif t is ast.If:
-            self.ev(s.test)  # type: ignore[attr-defined]
-            e1 = self.branch(s.body)  # type: ignore[attr-defined]
-            e2 = self.branch(s.orelse)  # type: ignore[attr-defined]
-            self.env = self.merge_env(e1, e2)
+            self.if_stmt(s)  # type: ignore[arg-type]
         elif t is ast.For or t is ast.AsyncFor or t is ast.While:
             self.loop(s)  # type: ignore[arg-type]
         elif t is ast.With or t is ast.AsyncWith:
@@ -694,10 +983,73 @@ class _FuncAnalyzer:
                 self.ev(s.exc)  # type: ignore[attr-defined]
         elif t is ast.Assert:
             self.ev(s.test)  # type: ignore[attr-defined]
+            tr, _ = guard_of(s.test)  # type: ignore[attr-defined]
+            self.clean_keys(tr)
+            self.note_guard(s, tr, True)
         elif t is ast.ClassDef:
             if not self.in_function:
                 self.block(s.body)  # type: ignore[attr-defined]
         # FunctionDef / Import / Pass / Global ...: nothing (nested defs are own functions)
+
+    # -- guards ---------------------------------------------------------------
+    def expand_keys(self, key: str) -> list[str]:
+        out = [key]
+        for a in self.alias.get(key, ()):
+            out.append(a)
+        return out
+
+    def cleaned(self, env: dict[str, Taint], g: dict) -> dict[str, Taint]:
+        if not g:
+            return env
+        out = dict(env)
+        for key, rules in g.items():
+            for k in self.expand_keys(key):
+                t = out.get(k)
+                if t is not None:
+                    out[k] = replace(t, san=t.san | rules)
+        return out
+
+    def clean_keys(self, g: dict) -> None:
+        self.env = self.cleaned(self.env, g)
+
+    def note_guard(self, s: ast.stmt, g: dict, rejects: bool) -> None:
+        """Record parameters this helper validates (top-level reject-by-raise guards)."""
+        if not g or not rejects or id(s) not in self.top_ids:
+            return
+        for key, rules in g.items():
+            t = self.env.get(key)
+            if key in self.pnames and t is not None and key in t.params:
+                self.pguard[key] = self.pguard.get(key, _NO_RULES) | rules
+
+    def if_stmt(self, s: ast.If) -> None:
+        self.ev(s.test)
+        tr, fa = guard_of(s.test)
+        saved = self.env
+        self.env = self.cleaned(saved, tr)
+        e1 = self.branch(s.body)
+        self.env = self.cleaned(saved, fa)
+        e2 = self.branch(s.orelse)
+        self.env = saved
+        x1 = _always_exits(s.body)
+        x2 = bool(s.orelse) and _always_exits(s.orelse)
+        if x1 and not x2:
+            self.env = e2
+            self.note_guard(s, fa, _raises(s.body))
+        elif x2 and not x1:
+            self.env = e1
+            self.note_guard(s, tr, _raises(s.orelse))
+        else:
+            self.env = self.merge_env(e1, e2)
+
+    def validator_stmt(self, s: ast.Expr) -> None:
+        """``validate_x(v)`` as a statement: v is clean for the rest of the scope."""
+        v = s.value.value if isinstance(s.value, ast.Await) else s.value
+        if not isinstance(v, ast.Call) or not _is_validator(_chain(v.func).rpartition(".")[2]):
+            return
+        g = {k: _GUARD_RULES for a in [*v.args, *(kw.value for kw in v.keywords)]
+             for k in _keys_of(a)}  # fmt: skip
+        self.clean_keys(g)
+        self.note_guard(s, g, True)
 
     def loop(self, s: ast.For | ast.AsyncFor | ast.While) -> None:
         """Walk the body, re-walking (up to _LOOP_PASSES) while loop-carried taint changes."""
@@ -743,6 +1095,13 @@ class _FuncAnalyzer:
         t = self.ev(val)
         for tg in s.targets:
             self.bind(tg, t, val, val)
+        if (
+            isinstance(val, ast.Call)
+            and _chain(val.func).rpartition(".")[2] in _URL_PARSERS
+            and len(s.targets) == 1
+            and isinstance(s.targets[0], ast.Name)
+        ):
+            self.alias[s.targets[0].id] = [k for a in val.args for k in _keys_of(a)]
 
     def bind(self, target: ast.AST, t: Taint | None, at: ast.AST, valnode: ast.AST) -> None:
         tt = type(target)
@@ -940,6 +1299,18 @@ class _FuncAnalyzer:
                     return None
                 return replace(merged, san=merged.san | rules)
 
+        # name-based validators (validate_*, sanitize*, safe_*, secure_filename ...)
+        if _is_validator(name.rpartition(".")[2]) or _is_validator(last):
+            if not match_sink(resolved):
+                if resolved in self.ix.functions:  # validator that itself reaches a sink
+                    self.project_call(n, resolved, name, arg_ts, kw_ts, recv_t)
+                merged = self.merge_all(recv_t, arg_ts, kw_ts)
+                return None if merged is None else replace(merged, san=merged.san | _GUARD_RULES)
+
+        # SQLAlchemy builders / bound parameters are not SQL strings
+        if self.sa_clean(n, resolved, last):
+            return None
+
         # project function: summaries
         if resolved in self.ix.functions:
             return self.project_call(n, resolved, name, arg_ts, kw_ts, recv_t)
@@ -965,6 +1336,33 @@ class _FuncAnalyzer:
         if out is not None and last in ("format", "join", "format_map"):
             out = replace(out, built=True)
         return out
+
+    def sa_clean(self, n: ast.Call, resolved: str, last: str) -> bool:
+        """SQLAlchemy ``insert/select/update/delete`` builders and ``text(..).bindparams(..)``."""
+        if resolved.startswith("sqlalchemy.") and last in _SA_BUILDERS | _SA_BOUND:
+            return True
+        f = n.func
+        if not (isinstance(f, ast.Attribute) and f.attr in _SA_CHAIN | _SA_BIND_METHODS):
+            return False
+        cur: ast.AST = f.value
+        while True:
+            if isinstance(cur, ast.Call):
+                cf = cur.func
+                cname = self.resolve(_chain(cf))
+                if cname.startswith("sqlalchemy."):
+                    clast = cname.rsplit(".", 1)[-1]
+                    if clast in _SA_BUILDERS:
+                        return f.attr in _SA_CHAIN
+                    if clast == "text":
+                        return f.attr in _SA_BIND_METHODS
+                if isinstance(cf, ast.Attribute):
+                    if cf.attr in _SA_CHAIN | _SA_BIND_METHODS:
+                        cur = cf.value
+                        continue
+                    if cf.attr in _SA_BUILDERS and f.attr in _SA_CHAIN:
+                        return True  # table.insert().values(...)
+                return False
+            return False
 
     @staticmethod
     def merge_all(recv_t, arg_ts, kw_ts) -> Taint | None:
@@ -1103,6 +1501,17 @@ class _FuncAnalyzer:
                 mapping.append((kn, t))
         at = self.loc(n)
         short = resolved.rsplit(".", 1)[-1]
+        if summ.pguard:
+            g: dict = {}
+            for i, a in enumerate(n.args):
+                if i < len(pos) and pos[i] in summ.pguard and not isinstance(a, ast.Starred):
+                    for k in _keys_of(a):
+                        g[k] = g.get(k, _NO_RULES) | summ.pguard[pos[i]]
+            for kw in n.keywords:
+                if kw.arg in summ.pguard:
+                    for k in _keys_of(kw.value):
+                        g[k] = g.get(k, _NO_RULES) | summ.pguard[kw.arg]
+            self.clean_keys(g)
         hop = (self.step(at, f"passed to {short}(...)"),)
         for pname, t in mapping:
             for h in summ.psinks.get(pname, ()):
@@ -1216,6 +1625,10 @@ def _ann_leaves(ann: ast.AST) -> set[str]:
     return out
 
 
-def analyze(index: ProjectIndex) -> list[Finding]:
-    """Run the taint analysis over the whole indexed project."""
-    return Engine(index).run()
+def analyze(index: ProjectIndex, *, include_local_sources: bool = False) -> list[Finding]:
+    """Run the taint analysis over the whole indexed project.
+
+    ``include_local_sources`` also treats ``sys.argv``, ``input()``, ``sys.stdin``,
+    ``os.environ`` and ``os.getenv`` as attacker-controlled (for CLI tools and scripts).
+    """
+    return Engine(index, include_local_sources).run()

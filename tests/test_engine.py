@@ -8,12 +8,12 @@ from vulnhound.index import build_index
 from vulnhound.taint.engine import analyze
 
 
-def run(tmp_path, files: dict[str, str]):
+def run(tmp_path, files: dict[str, str], **kw):
     for name, body in files.items():
         p = tmp_path / name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(textwrap.dedent(body))
-    return analyze(build_index(tmp_path, use_cache=False))
+    return analyze(build_index(tmp_path, use_cache=False), **kw)
 
 
 def lines(findings):
@@ -240,6 +240,7 @@ def test_script_sources_and_weak_env(tmp_path):
         os.system("x " + os.environ["HOME"])
         """
         },
+        include_local_sources=True,
     )
     assert len(fs) == 2
     by_line = {f.sink.line: f for f in fs}
@@ -392,6 +393,7 @@ def go():
     os.system(cmd)  # SINK
 """
         },
+        include_local_sources=True,
     )
     assert lines(fs) == marked(tmp_path, "a.py")
     assert any("global variable cmd" in s.note for s in fs[0].path)
@@ -451,6 +453,7 @@ class R:
         os.system(self.c)  # SINK
 """
         },
+        include_local_sources=True,
     )
     assert lines(fs) == marked(tmp_path, "a.py")
 
@@ -569,3 +572,236 @@ def a():
     )
     assert len(fs) == 1
     assert ("s.py", 4) in [(s.location.path, s.location.line) for s in fs[0].path]
+
+
+# --------------------------------------------------------------------------- guards / sources
+
+
+def test_local_sources_off_by_default(tmp_path):
+    src = {
+        "s.py": (
+            "import os, sys\nos.system('x ' + sys.argv[1])\nexec(input())\n"
+            "os.system(os.environ['A'])\n"
+        )
+    }
+    assert run(tmp_path, src) == []
+    assert len(run(tmp_path, src, include_local_sources=True)) == 3
+
+
+def test_local_source_does_not_hide_web_source(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "a.py": FLASK + "import os, sys\n@app.route('/')\ndef f():\n"
+            "    os.system(sys.argv[0] + request.args['a'])\n"
+        },
+    )
+    assert rules(fs) == ["cmdi"]
+
+
+GUARD_APP = FLASK + "import os, abort_mod\nfrom flask import abort, redirect\n"
+
+
+def _g(tmp_path, body: str, **kw):
+    return run(tmp_path, {"a.py": GUARD_APP + body}, **kw)
+
+
+def test_startswith_exit_guard_cleans(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    p = request.args["p"]
+    if not os.path.abspath(p).startswith("/base"):
+        abort(400)
+    open(p)
+"""
+    assert _g(tmp_path, body) == []
+
+
+def test_startswith_without_exit_still_flagged(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    p = request.args["p"]
+    if not p.startswith("/base"):
+        print("x")
+    open(p)
+"""
+    assert rules(_g(tmp_path, body)) == ["path-traversal"]
+
+
+def test_guard_only_clears_listed_rules(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    p = request.args["p"]
+    if not p.startswith("/base"):
+        abort(400)
+    os.system(p)
+"""
+    assert rules(_g(tmp_path, body)) == ["cmdi"]
+
+
+def test_validator_statement_and_value_validators(tmp_path):
+    body = """
+def validate_p(x): pass
+@app.route("/")
+def f():
+    p = request.args["p"]
+    validate_p(p)
+    open(p)
+    q = request.args["q"]
+    open(safe_join("/b", q))
+    open(request.args["z"])
+"""
+    fs = _g(tmp_path, body)
+    assert rules(fs) == ["path-traversal"] and fs[0].sink.line == lines(fs)[0]
+    assert len(fs) == 1
+
+
+def test_predicate_in_if_positive_branch_and_bool_ops(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    u = request.args["u"]
+    if is_safe_url(u) and u:
+        return redirect(u)
+    return redirect(u)
+"""
+    fs = _g(tmp_path, body)
+    assert len(fs) == 1
+
+
+def test_netloc_comparison_guard(tmp_path):
+    body = """
+from urllib.parse import urlparse
+@app.route("/")
+def f():
+    u = request.args["u"]
+    p = urlparse(u)
+    if p.netloc not in ("a.com",):
+        abort(400)
+    return redirect(u)
+"""
+    assert _g(tmp_path, body) == []
+
+
+def test_helper_that_raises_validates_param(tmp_path):
+    body = """
+def ensure(p):
+    if not os.path.abspath(p).startswith("/b"):
+        raise ValueError(p)
+def lenient(p):
+    if not p:
+        return None
+@app.route("/")
+def f():
+    p = request.args["p"]
+    ensure(p)
+    open(p)
+@app.route("/2")
+def g():
+    p = request.args["p"]
+    lenient(p)
+    open(p)
+"""
+    fs = _g(tmp_path, body)
+    assert len(fs) == 1 and fs[0].function.endswith(".g")
+
+
+def test_dotdot_check_path_only(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    p = request.args["p"]
+    if ".." in p:
+        abort(400)
+    open(p)
+    os.system(p)
+"""
+    assert rules(_g(tmp_path, body)) == ["cmdi"]
+
+
+def test_drf_and_tornado_sources(tmp_path):
+    fs = run(
+        tmp_path,
+        {
+            "v.py": """
+import os
+import tornado.web
+from rest_framework.views import APIView
+class V(APIView):
+    def post(self, request):
+        os.system(request.data["x"])
+    def get(self, request):
+        os.system(self.request.query_params.get("x"))
+class B(tornado.web.RequestHandler): pass
+class H(B):
+    def get(self, job):
+        os.system(job)
+    def post(self):
+        os.system(self.get_argument("c"))
+        os.system(self.request.body)
+    def util(self, other):
+        os.system(other)
+class NotHandler:
+    def get(self, job):
+        os.system(job)
+"""
+        },
+    )
+    assert lines(fs) == [7, 9, 13, 15, 16]
+
+
+def test_subprocess_env_not_cmdi(tmp_path):
+    src = {
+        "a.py": FLASK
+        + """
+import os, subprocess
+@app.route("/")
+def f():
+    env = os.environ.copy()
+    env["X"] = request.args["x"]
+    subprocess.run(["ls"], env=env)
+    subprocess.run(["ls"], env=os.environ.copy(), cwd="/")
+"""
+    }
+    assert run(tmp_path, src) == []
+    assert run(tmp_path, src, include_local_sources=True) == []
+
+
+def test_sqlalchemy_builders_and_bindparams_safe(tmp_path):
+    body = (
+        FLASK
+        + """
+from sqlalchemy import insert, select, update, text
+@app.route("/")
+def f(session, t):
+    q = request.args["q"]
+    session.execute(insert(t).values(name=f"{q}"))
+    session.execute(update(t).values(a="x" + q))
+    session.execute(select(t).where(t.c.a == "%" + q))
+    session.execute(text("select 1 where a like :p").bindparams(p=f"%{q}%"))
+    session.execute(t.insert().values(a="x" + q))
+@app.route("/bad")
+def g(session):
+    q = request.args["q"]
+    session.execute(text(f"select {q}"))
+"""
+    )
+    fs = run(tmp_path, {"a.py": body})
+    assert rules(fs) == ["sqli"] and fs[0].function.endswith(".g")
+
+
+def test_validator_that_itself_hits_a_sink_is_still_reported(tmp_path):
+    body = """
+import urllib.request
+def validate_url(u):
+    urllib.request.urlopen(u)
+    return u
+@app.route("/")
+def f():
+    validate_url(request.args["u"])
+"""
+    fs = _g(tmp_path, body)
+    assert rules(fs) == ["ssrf"]

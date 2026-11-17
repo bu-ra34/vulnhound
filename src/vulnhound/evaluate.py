@@ -68,7 +68,7 @@ def score(expected: set[Key], findings: list[Finding]) -> EvalResult:
 def analyze(index) -> list[Finding]:
     from .taint import engine
 
-    return engine.analyze(index)
+    return engine.analyze(index, include_local_sources=True)  # fixtures cover argv/env flows
 
 
 def evaluate(root: Path) -> EvalResult:
