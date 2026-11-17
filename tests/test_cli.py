@@ -33,6 +33,6 @@ def test_estimate_json(tmp_path, capsys):
     assert data["bytes"] == 12 and data["naive_tokens"] == 3
 
 
-def test_slice_not_implemented(capsys):
-    assert main(["slice", "VH-000000"]) == 2
-    assert "not implemented" in capsys.readouterr().err
+def test_slice_without_analysis(tmp_path, capsys):
+    assert main(["slice", "VH-000000", "--root", str(tmp_path)]) == 2
+    assert "analyze" in capsys.readouterr().err

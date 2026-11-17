@@ -11,15 +11,23 @@ from pathlib import Path
 from vulnhound import __version__
 
 SKIP_DIRS = {
-    "node_modules", "__pycache__", "build", "dist", "venv", "env", "site-packages",
+    "node_modules",
+    "__pycache__",
+    "build",
+    "dist",
+    "venv",
+    "env",
+    "site-packages",
 }
 EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
 SEVERITIES = ["low", "medium", "high", "critical"]
 
 
 def _not_implemented(what: str) -> int:
-    print(f"vulnhound: '{what}' is not implemented yet in this version ({__version__}).",
-          file=sys.stderr)
+    print(
+        f"vulnhound: '{what}' is not implemented yet in this version ({__version__}).",
+        file=sys.stderr,
+    )
     return EXIT_USAGE
 
 
@@ -66,22 +74,28 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
-    try:
-        from vulnhound.index import build_index
-        from vulnhound.taint.engine import analyze
-    except ImportError:
-        return _not_implemented("analyze")
+    from vulnhound import report, store
+    from vulnhound.index import build_index
+    from vulnhound.taint.engine import analyze
 
     root = Path(args.path).resolve()
+    if not root.is_dir():
+        print(f"vulnhound: not a directory: {root}", file=sys.stderr)
+        return EXIT_USAGE
     findings = analyze(build_index(root, use_cache=not args.no_cache))
     order = {s: i for i, s in enumerate(SEVERITIES)}
     findings = [f for f in findings if order[f.severity.value] >= order[args.min_severity]]
-    findings.sort(key=lambda f: -order[f.severity.value])
+    findings.sort(key=lambda f: (-order[f.severity.value], f.sink.path, f.sink.line))
+    meta = {"version": __version__, "root": str(root)}
+    try:
+        store.save_findings(root, findings, meta)
+    except OSError as e:
+        print(f"vulnhound: could not save findings: {e}", file=sys.stderr)
     if args.json:
-        print(json.dumps([f.to_dict() for f in findings]))
+        print(report.to_json(findings, meta))
     else:
         for f in findings:
-            print(f"{f.id} {f.severity.value:<8} {f.cwe} {f.sink} {f.rule}: {f.message}")
+            print(f"{f.severity.value.upper()} {f.id} {f.rule} {f.sink} {f.message}")
         if not findings:
             print("no findings")
     return EXIT_FINDINGS if findings else EXIT_OK
@@ -92,7 +106,7 @@ def cmd_slice(args: argparse.Namespace) -> int:
         from vulnhound import slicer  # type: ignore[attr-defined]
     except ImportError:
         return _not_implemented("slice")
-    return slicer.run(args.id)
+    return slicer.run(Path(args.root).resolve(), args.id)
 
 
 def cmd_prove(args: argparse.Namespace) -> int:
@@ -104,14 +118,17 @@ def cmd_prove(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
+    from vulnhound import report, store
+    from vulnhound.index import build_index
+    from vulnhound.taint.engine import analyze
+
+    root = Path(args.root).resolve()
     try:
-        from vulnhound import report
-        from vulnhound.index import build_index
-        from vulnhound.taint.engine import analyze
-    except ImportError:
-        return _not_implemented("report")
-    findings = analyze(build_index(Path(".").resolve()))
-    meta = {"version": __version__}
+        findings, meta = store.load_findings(root)
+    except (OSError, ValueError, KeyError):
+        findings = analyze(build_index(root))
+        meta = {}
+    meta = {**meta, "version": __version__, "root": meta.get("root", str(root))}
     render = {"json": report.to_json, "sarif": report.to_sarif, "markdown": report.to_markdown}
     out = render[args.format](findings, meta)
     if args.output:
@@ -142,11 +159,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("slice", help="print the minimal code slice for a finding")
     s.add_argument("id")
+    s.add_argument("--root", default=".", help="project root of the last analyze run")
     s.set_defaults(func=cmd_slice)
 
     pr = sub.add_parser("prove", help="run a PoC for a finding in a sandbox")
     pr.add_argument("id")
     pr.add_argument("--poc", required=True, metavar="FILE")
+    pr.add_argument("--root", default=".", help="project root of the last analyze run")
     pr.set_defaults(func=cmd_prove)
 
     e = sub.add_parser("estimate", help="estimate tokens to naively read the repo")
@@ -157,6 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("report", help="render findings as json, sarif or markdown")
     r.add_argument("--format", choices=["json", "sarif", "markdown"], default="markdown")
     r.add_argument("-o", "--output", metavar="FILE")
+    r.add_argument("--root", default=".", help="project root (default: current directory)")
     r.set_defaults(func=cmd_report)
 
     v = sub.add_parser("version", help="print version")
