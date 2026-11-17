@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vulnhound"
+dynamic = ["version"]
+description = "Token-thrifty vulnerability finder for Python projects: finds, proves, fixes."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["security", "vulnerability", "taint-analysis", "static-analysis", "claude-code"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+vulnhound = "vulnhound.cli:main"
+
+[project.urls]
+Repository = "https://github.com/bu-ra34/vulnhound"
+
+[tool.hatch.version]
+path = "src/vulnhound/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vulnhound"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

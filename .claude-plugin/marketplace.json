@@ -1,0 +1,12 @@
+{
+  "name": "vulnhound",
+  "owner": { "name": "bu-ra34" },
+  "plugins": [
+    {
+      "name": "vulnhound",
+      "source": "./",
+      "description": "Token-thrifty vulnerability finder for Python: finds, proves, fixes without reading the whole repo.",
+      "version": "0.1.0"
+    }
+  ]
+}
