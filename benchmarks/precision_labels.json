@@ -399,6 +399,16 @@
    "label": "fp",
    "category": "same-host-redirect",
    "note": "redirect target is request.path/URL path or reverse()+query; scheme/host not attacker-controlled"
+  },
+  "nautobot-3.2.9|open-redirect|nautobot/extras/views.py:1300|nautobot/extras/views.py:1252": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect to get_return_url(request, obj) where obj comes from form.save(); URL is built by the app (round-3 triage)."
+  },
+  "netbox-4.7.5|open-redirect|netbox/netbox/views/generic/object_views.py:352|netbox/netbox/views/generic/object_views.py:293": {
+   "label": "fp",
+   "category": "same-host-redirect",
+   "note": "redirect to get_return_url(request, obj) where obj comes from form.save(); URL is built by the app (round-3 triage)."
   }
  }
 }

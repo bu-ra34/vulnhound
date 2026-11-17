@@ -805,3 +805,278 @@ def f():
 """
     fs = _g(tmp_path, body)
     assert rules(fs) == ["ssrf"]
+
+
+# --------------------------------------------------------------------------- URL position
+URL_APP = (
+    "import requests\nfrom urllib.parse import urljoin, urlparse\n"
+    "from flask import Flask, redirect, request, url_for\napp = Flask(__name__)\n"
+    'CFG = "http://backend.internal"\n'
+)
+
+
+def _line_of(tmp_path, needle: str) -> int:
+    text = (tmp_path / "a.py").read_text().splitlines()
+    return next(i for i, ln in enumerate(text, 1) if needle in ln)
+
+
+def _u(tmp_path, body: str):
+    return run(tmp_path, {"a.py": URL_APP + body})
+
+
+def test_url_prefix_controlled_is_reported(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    n = request.args["n"]
+    redirect(n)  # SINK
+    redirect(n + "/x")  # SINK
+    redirect("/" + n)  # SINK
+    redirect("//" + n)  # SINK
+    redirect(f"https://{n}/x")  # SINK
+    redirect("%s/x" % n)  # SINK
+    redirect("{}/x".format(n))  # SINK
+    requests.get(n)  # SINK
+    requests.get(urljoin(CFG, n))  # SINK
+    requests.get("http://" + n + "/s")  # SINK
+    requests.get("https://api.example.com" + n)  # SINK
+"""
+    fs = _u(tmp_path, body)
+    assert lines(fs) == marked(tmp_path, "a.py")
+
+
+def test_url_fixed_head_is_not_open_redirect_or_ssrf(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    n = request.args["n"]
+    redirect("/items/" + n)
+    redirect(f"/items/{n}?x=1")
+    redirect("/items/%s" % n)
+    redirect("/items/{}".format(n))
+    redirect("/items/%s/%s" % (n, n))
+    requests.get("https://api.example.com/v1/" + n)
+    requests.get(f"{CFG}/{n}")
+    requests.get(CFG + n)
+    redirect("?next=" + n)
+"""
+    assert _u(tmp_path, body) == []
+
+
+def test_url_taint_after_separator_is_safe_but_head_is_not(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    a, b = request.args["a"], request.args["b"]
+    redirect(a + "?next=" + b)  # SINK
+    redirect(url_for("x") + "?next=" + b)
+"""
+    fs = _u(tmp_path, body)
+    assert lines(fs) == marked(tmp_path, "a.py")
+    assert {f.source.line for f in fs} == {_line_of(tmp_path, 'a, b = request.args["a"]')}
+
+
+def test_same_host_request_attributes_are_not_redirect_targets(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    redirect(request.path)
+    redirect(request.script_root + request.full_path.rstrip("?"))
+    redirect(request.path + "?" + request.query_string.decode())
+    p = urlparse(request.args["next"])
+    redirect(p.path + "?" + p.query)
+    redirect(urlparse(request.args["next"]).path)
+    redirect(request.url)  # SINK
+    redirect(request.args["next"])  # SINK
+"""
+    assert lines(_u(tmp_path, body)) == marked(tmp_path, "a.py")
+
+
+def test_django_reverse_and_get_full_path(tmp_path):
+    body = """
+from django.shortcuts import redirect
+from django.urls import reverse
+def v(request):
+    redirect(request.get_full_path())
+    redirect(reverse("home") + "?" + request.GET["q"])
+    redirect(request.GET["next"])  # SINK
+"""
+    fs = run(tmp_path, {"a.py": body})
+    assert lines(fs) == marked(tmp_path, "a.py")
+
+
+def test_merged_with_param_keeps_source_side_cleaning(tmp_path):
+    body = """
+def pick(nxt):
+    target = nxt
+    if not target:
+        target = request.script_root + request.path
+    return redirect(target)  # SINK
+@app.route("/")
+def f():
+    return pick(request.args["n"])
+"""
+    fs = _u(tmp_path, body)
+    # only the real attacker value reaches the sink; request.path (same-host) is not reported
+    assert [x.source.line for x in fs] == [_line_of(tmp_path, 'pick(request.args["n"])')]
+
+
+# --------------------------------------------------------------------------- lookups
+LOOKUP_APP = (
+    "import requests\nfrom flask import Flask, redirect, request, send_file\n"
+    "from django.shortcuts import get_object_or_404\napp = Flask(__name__)\n"
+)
+
+
+def _l(tmp_path, body: str):
+    return run(tmp_path, {"a.py": LOOKUP_APP + body})
+
+
+def test_database_lookup_results_are_clean(tmp_path):
+    body = """
+class UserDAO:
+    @staticmethod
+    def find_by_id(i):
+        return i
+@app.route("/")
+def f(session, repo):
+    store = get_store()
+    i = request.args["id"]
+    redirect(Doc.objects.get(pk=i).url)
+    redirect(Doc.objects.filter(a=i).first().url)
+    redirect(get_object_or_404(Doc, pk=i).url)
+    redirect(session.get(Doc, i).url)
+    redirect(session.query(Doc).filter_by(n=i).one().url)
+    redirect(UserDAO.find_by_id(i).url)
+    redirect(repo.find_by_name(i).url)
+    redirect(repo.get_by_id(i).url)
+    redirect(store.get_trace_info(i).url)
+    send_file(Doc.objects.get(pk=i).path)
+"""
+    assert _l(tmp_path, body) == []
+
+
+def test_lookup_key_and_non_lookups_stay_tainted(tmp_path):
+    body = """
+@app.route("/")
+def f(cache):
+    i = request.args["id"]
+    Doc.objects.get(pk=i)
+    redirect(i)  # SINK
+    redirect(cache.get(i))  # SINK
+    redirect({"a": i}.get("a"))  # SINK
+    send_file(i)  # SINK
+"""
+    assert lines(_l(tmp_path, body)) == marked(tmp_path, "a.py")
+
+
+def test_lookup_still_checks_sinks_on_its_arguments(tmp_path):
+    body = """
+@app.route("/")
+def f():
+    return Doc.objects.raw("select * from d where n = '%s'" % request.args["n"])  # SINK
+"""
+    fs = _l(tmp_path, body)
+    assert rules(fs) == ["sqli"] and lines(fs) == marked(tmp_path, "a.py")
+
+
+def test_lookup_helper_project_function_does_not_leak_return_taint(tmp_path):
+    body = """
+def load(i):
+    return Doc.objects.get(pk=i)
+def load_by(i):
+    return i
+@app.route("/")
+def f():
+    i = request.args["id"]
+    redirect(load(i).url)
+    redirect(load_by(i))  # SINK
+"""
+    assert lines(_l(tmp_path, body)) == marked(tmp_path, "a.py")
+
+
+# --------------------------------------------------------------------------- positive guards
+def test_positive_branch_guards(tmp_path):
+    body = """
+def is_safe_url(u):
+    return u.startswith("/")
+def helper():
+    x = request.args.get("next")
+    if x and is_safe_url(x):
+        return x
+    return None
+def helper_ifexp():
+    x = request.args.get("next")
+    return x if is_safe_url(x) else "/"
+def helper_param(fallback):
+    x = request.args.get("next")
+    if x and is_safe_url(x):
+        return x
+    return fallback
+@app.route("/")
+def f():
+    redirect(helper())
+    redirect(helper_ifexp())
+    redirect(helper_param("/"))
+    x = request.args.get("n")
+    redirect(is_safe_url(x) and x or "/")
+    if validate(x):
+        redirect(x)
+"""
+    assert _u(tmp_path, body) == []
+
+
+def test_negative_arms_of_guards_stay_tainted(tmp_path):
+    body = """
+def is_safe_url(u):
+    return u.startswith("/")
+@app.route("/")
+def f():
+    x = request.args.get("n")
+    redirect("/" if is_safe_url(x) else x)  # SINK
+    redirect(x or "/")  # SINK
+    if is_safe_url(x):
+        pass
+    else:
+        redirect(x)  # SINK
+    if x:
+        redirect(x)  # SINK
+"""
+    assert lines(_u(tmp_path, body)) == marked(tmp_path, "a.py")
+
+
+# --------------------------------------------------------------------------- validator reassign
+def test_reassigned_validator_result_and_falsy_branch(tmp_path):
+    body = """
+import os, posixpath
+def validate_path_is_safe(p):
+    if ".." in p:
+        raise ValueError(p)
+    return p
+@app.route("/")
+def f():
+    path = request.args.get("path")
+    if path:
+        path = validate_path_is_safe(path)
+        open(posixpath.join("attachments", path))
+        open(os.path.abspath(path))
+    open(path or "x")
+"""
+    assert run(tmp_path, {"a.py": FLASK + body}) == []
+
+
+def test_validator_in_one_branch_only_is_incomplete(tmp_path):
+    body = """
+def validate_path_is_safe(p):
+    return p
+@app.route("/")
+def f():
+    path = request.args.get("path")
+    if request.args.get("strict"):
+        path = validate_path_is_safe(path)
+    open(path)  # SINK
+    other = validate_path_is_safe(request.args["a"])
+    open(other + request.args["b"])  # SINK
+"""
+    fs = run(tmp_path, {"a.py": FLASK + body})
+    assert lines(fs) == marked(tmp_path, "a.py")

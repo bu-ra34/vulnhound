@@ -930,8 +930,14 @@ SANITIZERS: tuple[Sanitizer, ...] = (
         ("open-redirect",),
         "host allow-list check",
     ),
-    Sanitizer("flask.url_for", ("open-redirect",), "internal endpoint"),
-    Sanitizer("django.urls.reverse", ("open-redirect",), "internal endpoint"),
+    # reverse()/url_for()/get_absolute_url() return a site-local path: the host is never chosen
+    # by the caller, so neither a redirect nor a server-side request can leave the site.
+    Sanitizer("flask.url_for", ("open-redirect", "ssrf"), "internal endpoint"),
+    Sanitizer("django.urls.reverse", ("open-redirect", "ssrf"), "internal endpoint"),
+    Sanitizer("django.urls.reverse_lazy", ("open-redirect", "ssrf"), "internal endpoint"),
+    Sanitizer("*.unsign", _ALL, "signature-verified value"),
+    Sanitizer("*.unsign_object", _ALL, "signature-verified value"),
+    Sanitizer("*.get_absolute_url", ("open-redirect", "ssrf"), "site-local path"),
 )
 # urllib.parse.quote deliberately absent: it does NOT sanitize ssrf, sqli or others.
 

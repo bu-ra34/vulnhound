@@ -95,6 +95,49 @@ _GUARD_RULES = frozenset({"path-traversal", "ssrf", "open-redirect"})
 _PATH_ONLY = frozenset({"path-traversal"})
 _URL_RULES = frozenset({"ssrf", "open-redirect"})
 _NO_RULES: frozenset = frozenset()
+_SAME_HOST_ATTRS = frozenset(
+    {"path", "path_info", "full_path", "script_root", "script_name", "uri"}
+)  # fmt: skip
+_NON_DATA_ATTRS = frozenset({"model", "_meta", "__class__", "qs"})
+_URL_PATH_PARTS = frozenset({"path", "query", "fragment", "params"})
+_OPAQUE = "\x00"  # untainted, non-constant text inside a string being built
+_TAINTED = "\x01"  # first attacker-controlled piece of a string being built
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+_ABS_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://[^/?#\x01]*[/?#]")
+_FMT_PCT_RE = re.compile(r"%%|%(?:\([^)]*\))?[#0\- +]*[\d*]*(?:\.[\d*]+)?[a-zA-Z]")
+_FMT_BRACE_RE = re.compile(r"\{\{|\}\}|\{([^{}!:]*)(?:![rsa])?(?::[^{}]*)?\}")
+_LOOKUP_FUNCS = frozenset(
+    {"get_object_or_404", "get_list_or_404", "aget_object_or_404", "aget_list_or_404"}
+)
+_ORM_TERMINALS = frozenset(
+    {"get", "first", "last", "one", "one_or_none", "scalar", "scalars", "scalar_one",
+     "scalar_one_or_none", "all", "count", "exists", "get_one"}
+)  # fmt: skip
+_SESSION_NAMES = frozenset({"session", "db", "dbsession", "db_session", "sess", "s"})
+_STORE_RECV_RE = re.compile(r"(?:^|_)(?:store|stores|dao|repository|registry|db|database)$", re.I)
+_STORE_VERB_RE = re.compile(r"^(?:get|find|fetch|lookup|retrieve|search|list|query)(?:_|$)")
+_GRIDFS_METHODS = frozenset(
+    {"get", "get_version", "get_last_version", "find", "find_one", "open_download_stream"}
+)
+
+
+def _head_is_fixed(prefix: str) -> bool:
+    """True if text starting with *prefix* (up to the first attacker piece) cannot make the
+    resulting URL point at an attacker-chosen scheme/host."""
+    p = prefix.split(_TAINTED, 1)[0]
+    if p.startswith(_OPAQUE):
+        return True  # starts with a non-tainted value (config base URL etc.)
+    if not p:
+        return False
+    if _SCHEME_RE.match(p):
+        if p.startswith(("http://" + _OPAQUE, "https://" + _OPAQUE)):
+            return True
+        return bool(_ABS_URL_RE.match(p))  # scheme://fixed-host/ ... then the taint
+    if p[0] in "/\\":
+        return len(p) > 1 and p[1] not in "/\\"  # "/x" yes; "/" and "//" no
+    return any(c in p for c in "/?#")  # relative reference such as "a/" or "?next="
+
+
 _VALIDATOR_PREFIX = ("validate_", "sanitize", "sanitise", "safe_", "check_safe", "ensure_safe",
                      "assert_safe")  # fmt: skip
 _PREDICATE_RE = re.compile(
@@ -229,6 +272,9 @@ def guard_of(test: ast.AST) -> tuple[dict, dict]:
         for p in parts[1:]:
             tr = _isect_guard(tr, p[0])
         return tr, fa
+    if t is ast.Name or t is ast.Attribute:
+        ks = _keys_of(test)
+        return {}, {k: _GUARD_RULES for k in ks}  # falsy (empty / None) is harmless
     if t is ast.Call:
         func = test.func  # type: ignore[attr-defined]
         last = _chain(func).rpartition(".")[2]
@@ -248,6 +294,12 @@ def guard_of(test: ast.AST) -> tuple[dict, dict]:
             return {}, {}
         keys: list[str] = []
         rules = _NO_RULES
+        if isinstance(right, ast.Constant) and not isinstance(op, (ast.In, ast.NotIn)):
+            if right.value is None or right.value == "":
+                keys, rules = _keys_of(left), _GUARD_RULES
+        elif isinstance(left, ast.Constant) and not isinstance(op, (ast.In, ast.NotIn)):
+            if left.value is None or left.value == "":
+                keys, rules = _keys_of(right), _GUARD_RULES
         for side in (left, right):
             if isinstance(side, ast.Attribute) and side.attr in ("netloc", "hostname", "host"):
                 v = side.value
@@ -323,6 +375,7 @@ class Taint:
     san: frozenset
     built: bool
     steps: tuple
+    ssan: frozenset | None = None  # source-side sanitization when it differs from ``san``
 
 
 @dataclass(frozen=True)
@@ -338,8 +391,23 @@ class Hit:
     via: str = ""  # first project function hop name, for messages
 
 
+def _ssan(t: Taint) -> frozenset:
+    return t.san if t.ssan is None else t.ssan
+
+
+def _add_san(t: Taint, rules: frozenset) -> Taint:
+    return replace(t, san=t.san | rules, ssan=None if t.ssan is None else t.ssan | rules)
+
+
+def _dirty(t: Taint, rule: str) -> bool:
+    """True if *rule* is not cleared for the source part or for the symbolic-param part."""
+    if t.src is None and not t.params:
+        return rule not in t.san
+    return (t.src is not None and rule not in _ssan(t)) or (bool(t.params) and rule not in t.san)
+
+
 def _tsig(t: Taint) -> tuple:
-    return (t.src.loc if t.src else None, tuple(sorted(t.san)), t.built)
+    return (t.src.loc if t.src else None, tuple(sorted(t.san)), tuple(sorted(_ssan(t))), t.built)
 
 
 def _same(a: Taint | None, b: Taint | None) -> bool:
@@ -362,7 +430,15 @@ def tmerge(a: Taint | None, b: Taint | None) -> Taint | None:
     if b is None or a is b:
         return a
     prim = b if _score(b) > _score(a) else a
-    return Taint(prim.src, a.params | b.params, a.san & b.san, a.built or b.built, prim.steps)
+    params = a.params | b.params
+    ps = [x.san for x in (a, b) if x.params] or [a.san, b.san]
+    ss = [_ssan(x) for x in (a, b) if x.src is not None] or ps
+    san_p = ps[0] & ps[-1]
+    san_s = ss[0] & ss[-1]
+    if not params:
+        san_p = san_s
+    return Taint(prim.src, params, san_p, a.built or b.built, prim.steps,
+                 None if san_s == san_p or prim.src is None else san_s)  # fmt: skip
 
 
 def _chain(n: ast.AST) -> str:
@@ -727,7 +803,7 @@ class _FuncAnalyzer:
             for p in self.ret.params:
                 s.pret[p] = (self.ret.san, self.ret.built)
             if self.ret.src is not None:
-                rs = replace(self.ret, params=frozenset())
+                rs = replace(self.ret, params=frozenset(), san=_ssan(self.ret), ssan=None)
                 if self.ret_src_step is not None:
                     rs = _add_step(rs, self.ret_src_step)
                 s.ret_src = rs
@@ -892,7 +968,8 @@ class _FuncAnalyzer:
                 if pre.startswith("django"):
                     label = "request." + label
         loc = self.loc(node)
-        return Taint(Src(loc, label, weak, local), frozenset(), frozenset(), False,
+        san = _URL_RULES if label.rpartition(".")[2] in _SAME_HOST_ATTRS else _NO_RULES
+        return Taint(Src(loc, label, weak, local), frozenset(), san, False,
                      (self.step(loc, f"source: {label}"),))  # fmt: skip
 
     # -- statements ---------------------------------------------------------
@@ -1006,7 +1083,7 @@ class _FuncAnalyzer:
             for k in self.expand_keys(key):
                 t = out.get(k)
                 if t is not None:
-                    out[k] = replace(t, san=t.san | rules)
+                    out[k] = _add_san(t, rules)
         return out
 
     def clean_keys(self, g: dict) -> None:
@@ -1193,23 +1270,35 @@ class _FuncAnalyzer:
                 src = self.chain_source(n)
                 if src is not None:
                     return src
-            return self.ev(n.value)  # type: ignore[attr-defined]
+            inner = self.ev(n.value)  # type: ignore[attr-defined]
+            if n.attr in _NON_DATA_ATTRS:  # type: ignore[attr-defined]
+                return None  # model class / queryset metadata, not attacker-supplied content
+            if inner is not None and (
+                n.attr in _SAME_HOST_ATTRS  # type: ignore[attr-defined]
+                or (n.attr in _URL_PATH_PARTS and self.is_url_parse(n.value))  # type: ignore[attr-defined]
+            ):
+                return _add_san(inner, _URL_RULES)  # path/query never hold scheme or host
+            return inner
         if t is ast.Call:
+            f = n.func  # type: ignore[attr-defined]
+            if (
+                isinstance(f, ast.Attribute)
+                and f.attr == "format"
+                and isinstance(f.value, ast.Constant)
+                and isinstance(f.value.value, str)
+            ):
+                r = self.finalize(self.pieces(n))
+                return None if r is None else replace(r, built=True)
             return self.call(n)  # type: ignore[arg-type]
-        if t is ast.JoinedStr:
-            acc = None
-            for v in n.values:  # type: ignore[attr-defined]
-                acc = tmerge(acc, self.ev(v))
-            return replace(acc, built=True) if acc is not None else None
+        if t is ast.JoinedStr or (t is ast.BinOp and isinstance(n.op, (ast.Add, ast.Mod))):  # type: ignore[attr-defined]
+            r = self.finalize(self.pieces(n))
+            return None if r is None else replace(r, built=True)
         if t is ast.FormattedValue:
             a = self.ev(n.value)  # type: ignore[attr-defined]
             self.ev(n.format_spec)  # type: ignore[attr-defined]
             return a
         if t is ast.BinOp:
-            r = tmerge(self.ev(n.left), self.ev(n.right))  # type: ignore[attr-defined]
-            if r is not None and isinstance(n.op, (ast.Add, ast.Mod)):  # type: ignore[attr-defined]
-                r = replace(r, built=True)
-            return r
+            return tmerge(self.ev(n.left), self.ev(n.right))  # type: ignore[attr-defined]
         if t is ast.Subscript:
             v = self.ev(n.value)  # type: ignore[attr-defined]
             self.ev(n.slice)  # type: ignore[attr-defined]
@@ -1229,7 +1318,26 @@ class _FuncAnalyzer:
             return None if isinstance(n.op, ast.Not) else r  # type: ignore[attr-defined]
         if t is ast.IfExp:
             self.ev(n.test)  # type: ignore[attr-defined]
-            return tmerge(self.ev(n.body), self.ev(n.orelse))  # type: ignore[attr-defined]
+            tr, fa = guard_of(n.test)  # type: ignore[attr-defined]
+            saved = self.env
+            self.env = self.cleaned(saved, tr)
+            a = self.ev(n.body)  # type: ignore[attr-defined]
+            self.env = self.cleaned(saved, fa)
+            b = self.ev(n.orelse)  # type: ignore[attr-defined]
+            self.env = saved
+            return tmerge(a, b)
+        if t is ast.BoolOp:
+            saved = self.env
+            acc = None
+            g: dict = {}
+            is_and = isinstance(n.op, ast.And)  # type: ignore[attr-defined]
+            for v in n.values:  # type: ignore[attr-defined]
+                self.env = self.cleaned(saved, g)
+                acc = tmerge(acc, self.ev(v))
+                tr, fa = guard_of(v)
+                g = _merge_guard(g, tr if is_and else fa)
+            self.env = saved
+            return acc
         if t is ast.Lambda:
             return None
         if t in (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp):
@@ -1247,6 +1355,107 @@ class _FuncAnalyzer:
             if isinstance(c, ast.expr_context):
                 continue
             acc = tmerge(acc, self.ev(c))
+        return acc
+
+    def is_url_parse(self, n: ast.AST) -> bool:
+        """``urlparse(x)`` / ``urlsplit(x)`` or a variable bound to one."""
+        if isinstance(n, ast.Call):
+            return self.resolve(_chain(n.func)).rpartition(".")[2] in _URL_PARSERS
+        if isinstance(n, ast.Name):
+            return self.types.get(n.id, "").rpartition(".")[2] in _URL_PARSERS
+        return False
+
+    def pieces(self, n: ast.AST) -> list:
+        """Flatten a string-building expression into ``("text", str)`` / ``("val", Taint|None)``."""
+        t = type(n)
+        if t is ast.Constant:
+            return [("text", n.value if isinstance(n.value, str) else _OPAQUE)]  # type: ignore[attr-defined]
+        if t is ast.BinOp and isinstance(n.op, ast.Add):  # type: ignore[attr-defined]
+            return self.pieces(n.left) + self.pieces(n.right)  # type: ignore[attr-defined]
+        if t is ast.BinOp and isinstance(n.op, ast.Mod):  # type: ignore[attr-defined]
+            lf, rt = n.left, n.right  # type: ignore[attr-defined]
+            if not (isinstance(lf, ast.Constant) and isinstance(lf.value, str)):
+                return [*self.pieces(lf), ("val", self.ev(rt))]
+            multi = isinstance(rt, ast.Tuple)
+            args = [self.pieces(x) for x in (rt.elts if isinstance(rt, ast.Tuple) else [rt])]
+            seq = iter(args)
+            out: list = []
+            pos = 0
+            for m in _FMT_PCT_RE.finditer(lf.value):
+                out.append(("text", lf.value[pos : m.start()]))
+                pos = m.end()
+                if m.group(0) == "%%":
+                    out.append(("text", "%"))
+                else:
+                    out += (next(seq, None) or [("text", _OPAQUE)]) if multi else args[0]
+            out.append(("text", lf.value[pos:]))
+            return out
+        if t is ast.JoinedStr:
+            out = []
+            for v in n.values:  # type: ignore[attr-defined]
+                if isinstance(v, ast.FormattedValue):
+                    out += self.pieces(v.value)
+                    self.ev(v.format_spec)
+                else:
+                    out += self.pieces(v)
+            return out
+        if (
+            t is ast.Call
+            and isinstance(n.func, ast.Attribute)  # type: ignore[attr-defined]
+            and n.func.attr == "format"  # type: ignore[attr-defined]
+            and isinstance(n.func.value, ast.Constant)  # type: ignore[attr-defined]
+            and isinstance(n.func.value.value, str)  # type: ignore[attr-defined]
+        ):
+            fmt = n.func.value.value  # type: ignore[attr-defined]
+            pos_parts = [self.pieces(a.value if isinstance(a, ast.Starred) else a) for a in n.args]  # type: ignore[attr-defined]
+            kw_parts = {kw.arg: self.pieces(kw.value) for kw in n.keywords}  # type: ignore[attr-defined]
+            out = []
+            pos = 0
+            auto = 0
+            for m in _FMT_BRACE_RE.finditer(fmt):
+                out.append(("text", fmt[pos : m.start()]))
+                pos = m.end()
+                if m.group(0) in ("{{", "}}"):
+                    out.append(("text", m.group(0)[0]))
+                    continue
+                field = (m.group(1) or "").split(".")[0].split("[")[0]
+                if field == "":
+                    field, auto = str(auto), auto + 1
+                got = kw_parts.get(field)
+                if field.isdigit() and int(field) < len(pos_parts):
+                    got = pos_parts[int(field)]
+                out += got if got is not None else [("text", _OPAQUE)]
+            out.append(("text", fmt[pos:]))
+            return out
+        return [("val", self.ev(n))]
+
+    @staticmethod
+    def finalize(items: list) -> Taint | None:
+        """Merge the taint of a built string; pieces that cannot influence the scheme/host of a
+        URL (fixed or untainted head, or anything after the first ``/ ? #``) get ssrf and
+        open-redirect cleared."""
+        prefix = ""
+        seen = fixed = past = False
+        acc: Taint | None = None
+        for kind, x in items:
+            if kind == "text":
+                if seen and not past and any(c in x for c in "/?#"):
+                    past = True
+                if not seen:
+                    prefix += x
+                continue
+            if x is None or not (_dirty(x, "ssrf") or _dirty(x, "open-redirect")):
+                if not seen:
+                    prefix += _OPAQUE
+                acc = tmerge(acc, x)
+                continue
+            if not seen:
+                seen = True
+                fixed = _head_is_fixed(prefix + _TAINTED)
+                safe = fixed
+            else:
+                safe = fixed or past
+            acc = tmerge(acc, _add_san(x, _URL_RULES) if safe else x)
         return acc
 
     def comp(self, n) -> Taint | None:
@@ -1297,7 +1506,7 @@ class _FuncAnalyzer:
                 merged = self.merge_all(recv_t, arg_ts, kw_ts)
                 if merged is None or rules >= _ALL_RULES:
                     return None
-                return replace(merged, san=merged.san | rules)
+                return _add_san(merged, rules)
 
         # name-based validators (validate_*, sanitize*, safe_*, secure_filename ...)
         if _is_validator(name.rpartition(".")[2]) or _is_validator(last):
@@ -1305,10 +1514,18 @@ class _FuncAnalyzer:
                 if resolved in self.ix.functions:  # validator that itself reaches a sink
                     self.project_call(n, resolved, name, arg_ts, kw_ts, recv_t)
                 merged = self.merge_all(recv_t, arg_ts, kw_ts)
-                return None if merged is None else replace(merged, san=merged.san | _GUARD_RULES)
+                return None if merged is None else _add_san(merged, _GUARD_RULES)
 
         # SQLAlchemy builders / bound parameters are not SQL strings
         if self.sa_clean(n, resolved, last):
+            return None
+
+        # lookups keyed by a tainted id return stored objects, not attacker-supplied content
+        if self.is_lookup(n, name, last, recv_t):
+            if resolved in self.ix.functions:
+                self.project_call(n, resolved, name, arg_ts, kw_ts, recv_t)
+            else:
+                self.check_sinks(n, name, resolved, arg_nodes, arg_ts, kw_ts, recv_t)
             return None
 
         # project function: summaries
@@ -1335,7 +1552,37 @@ class _FuncAnalyzer:
         out = self.merge_all(recv_t, arg_ts, kw_ts)
         if out is not None and last in ("format", "join", "format_map"):
             out = replace(out, built=True)
+        if out is not None and last in ("get_full_path", "get_full_path_info"):
+            out = _add_san(out, _URL_RULES)
         return out
+
+    def is_lookup(self, n: ast.Call, name: str, last: str, recv_t: Taint | None) -> bool:
+        """ORM / DAO / store lookups: ``Model.objects.get``, ``session.get``, ``find_by_id``, ..."""
+        if last in _LOOKUP_FUNCS or last.startswith(("find_by_", "get_by_")):
+            return True
+        segs = [x.rstrip("()[]") for x in name.split(".")]
+        if len(segs) < 2 or not isinstance(n.func, ast.Attribute):
+            return False
+        recv = segs[:-1]
+        if "objects" in recv or "_default_manager" in recv:
+            return True
+        if last in _ORM_TERMINALS:
+            if (
+                "query" in recv[1:]
+                or recv[0] == "query"
+                or (len(recv) == 1 and recv[0].lower() in _SESSION_NAMES)
+                or (len(recv) >= 2 and recv[-1].lower() == "session")
+            ):
+                return True
+        if last.startswith(("find", "get")) and recv[-1].lower().endswith("dao"):
+            return True
+        if last in _GRIDFS_METHODS and (
+            "GridFS" in name or self.types.get(recv[0], "").rpartition(".")[2] == "GridFS"
+        ):
+            return True
+        return bool(
+            recv_t is None and _STORE_VERB_RE.match(last) and _STORE_RECV_RE.search(recv[-1])
+        )
 
     def sa_clean(self, n: ast.Call, resolved: str, last: str) -> bool:
         """SQLAlchemy ``insert/select/update/delete`` builders and ``text(..).bindparams(..)``."""
@@ -1435,17 +1682,19 @@ class _FuncAnalyzer:
 
     @staticmethod
     def _eff(t: Taint, s: Sink) -> bool:
-        return s.rule not in t.san
+        return _dirty(t, s.rule)
 
     def apply_hit(self, t: Taint, hit: Hit, hop: tuple, interproc: bool = False) -> None:
-        if hit.rule in t.san:
+        src_dirty = t.src is not None and hit.rule not in _ssan(t)
+        par_dirty = bool(t.params) and hit.rule not in t.san
+        if not (src_dirty or par_dirty):
             return
         if hit.needs_built and not t.built and not t.params:
             return
         steps = (*t.steps, *hop, *hit.steps)
-        if t.src is not None and (not hit.needs_built or t.built):
+        if src_dirty and t.src is not None and (not hit.needs_built or t.built):
             self.emit(t.src, hit, steps, interproc)
-        if t.params:
+        if par_dirty:
             rec = replace(hit, needs_built=hit.needs_built and not t.built, steps=_cap(steps))
             if interproc:
                 rec = replace(rec, conf=min(rec.conf, 0.7))
@@ -1524,7 +1773,7 @@ class _FuncAnalyzer:
             for pname, t in mapping:
                 for attr, (san, built) in summ.pfield.get(pname, {}).items():
                     if t.src is not None:
-                        ft = replace(t, san=t.san | san, built=t.built or built)
+                        ft = replace(_add_san(t, san), built=t.built or built)
                         eng.write_field(cls, attr, self.with_step(ft, at, f"stored in {attr}"))
         out = summ.ret_src
         for pname, t in mapping:
@@ -1532,7 +1781,7 @@ class _FuncAnalyzer:
             if r is None:
                 continue
             san, built = r
-            tt = replace(t, san=t.san | san, built=t.built or built)
+            tt = replace(_add_san(t, san), built=t.built or built)
             rst = summ.pret_step.get(pname)
             for st in rst or ():
                 tt = _add_step(tt, st)

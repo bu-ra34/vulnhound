@@ -135,3 +135,10 @@ def test_archive_response_and_deser_sinks():
     assert n.requires_kwarg == {"allow_pickle": True}
     for name in ("pandas.read_pickle", "torch.load", "joblib.load", "dill.loads"):
         assert match_sink(name)[0].rule == "deserialization", name
+
+
+def test_site_local_url_sanitizers_cover_ssrf_and_redirect():
+    for call in ("flask.url_for", "django.urls.reverse", "obj.get_absolute_url"):
+        assert is_sanitizer(call, "open-redirect") and is_sanitizer(call, "ssrf")
+        assert not is_sanitizer(call, "path-traversal")
+    assert is_sanitizer("signer.unsign", "open-redirect")
