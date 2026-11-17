@@ -1,6 +1,9 @@
 {
   "name": "vulnhound",
-  "owner": { "name": "bu-ra34" },
+  "description": "vulnhound: token-thrifty vulnerability finder for Python projects",
+  "owner": {
+    "name": "bu-ra34"
+  },
   "plugins": [
     {
       "name": "vulnhound",
