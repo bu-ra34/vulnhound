@@ -116,3 +116,28 @@ def test_slice_includes_helper_and_strips_expect(tmp_path):
     out = slicer.build_slice(index, g)
     assert "def _build(opts):" in out and 'return "mytool " + opts' in out
     assert "VH-EXPECT" not in out
+
+
+def test_match_statement_does_not_crash(tmp_path):
+    """Regression: match_case nodes have no lineno (crashed on mlflow)."""
+    from vulnhound.taint.engine import analyze
+
+    (tmp_path / "app.py").write_text(
+        "import os\n"
+        "from flask import Flask, request\n"
+        "app = Flask(__name__)\n"
+        "@app.route('/x')\n"
+        "def x():\n"
+        "    cmd = request.args['c']\n"
+        "    match cmd:\n"
+        "        case 'a':\n"
+        "            return 'a'\n"
+        "        case _:\n"
+        "            os.system(cmd)\n"
+        "    return 'ok'\n"
+    )
+    index = build_index(tmp_path, use_cache=False)
+    findings = analyze(index)
+    assert findings
+    out = slicer.build_slice(index, findings[0])
+    assert "os.system(cmd)" in out and "◀ sink" in out

@@ -49,6 +49,8 @@ def _sig_last(node: ast.AST) -> int:
 
 def _header_span(node: ast.stmt) -> tuple[int, int]:
     """Lines of a statement; for compound statements only the header."""
+    if isinstance(node, ast.match_case):  # no lineno of its own (Python 3.10+)
+        return node.pattern.lineno, max(node.pattern.end_lineno or 0, node.pattern.lineno)
     start = node.lineno
     if isinstance(node, _FUNC + (ast.ClassDef,)) and node.decorator_list:
         start = min(d.lineno for d in node.decorator_list)
@@ -58,7 +60,7 @@ def _header_span(node: ast.stmt) -> tuple[int, int]:
     for f in _BODY_FIELDS:
         body = getattr(node, f, None)
         if isinstance(body, list) and body:
-            end = min(end, body[0].lineno - 1)
+            end = min(end, (getattr(body[0], "lineno", None) or body[0].pattern.lineno) - 1)
     end = max(end, node.lineno)
     return start, min(end, start + _MAX_STMT_LINES - 1)
 
