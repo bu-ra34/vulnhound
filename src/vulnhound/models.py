@@ -38,7 +38,8 @@ class FunctionInfo:
     end_line: int
     params: list[str] = field(default_factory=list)
     decorators: list[str] = field(default_factory=list)  # dotted source text, e.g. "app.route"
-    calls: list[str] = field(default_factory=list)  # resolved qualnames when known, else raw dotted names
+    # resolved qualnames when known, else raw dotted names
+    calls: list[str] = field(default_factory=list)
     is_method: bool = False
 
 
@@ -64,7 +65,8 @@ class Step:
 @dataclass
 class Finding:
     id: str  # stable short hash, e.g. "VH-3f9a1c"
-    rule: str  # e.g. "sqli", "cmdi", "ssti", "ssrf", "path-traversal", "deserialization", "code-exec"
+    # e.g. "sqli", "cmdi", "ssti", "ssrf", "path-traversal", "deserialization", "code-exec"
+    rule: str
     cwe: str  # e.g. "CWE-89"
     severity: Severity
     confidence: float  # 0.0 - 1.0, how sure the static engine is
