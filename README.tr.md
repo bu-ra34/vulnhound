@@ -45,12 +45,18 @@ pip install vulnhound
 |---|---|
 | `vulnhound analyze [path] [--json] [--no-cache] [--min-severity S]` | Aday zafiyetleri bulur. Bulgu varsa çıkış kodu 1. Aynı sink/yardımcıyı paylaşan bulgular gruplanır (`--no-group` hepsini listeler); tests/examples/docs dizinleri ve `test_*.py` `--include-tests` verilmedikçe atlanır; `--include-local-sources` yerel/CLI girdilerini kaynak sayar. |
 | `vulnhound slice <id>` | Bir bulgu için minimal kod parçası. |
-| `vulnhound prove <id> --poc FILE` | PoC'yi sandbox içinde çalıştırır. |
+| `vulnhound prove <id> --poc FILE [--root DIR] [--backend auto\|docker\|unshare] [--timeout S] [--json] [--verbose]` | PoC'yi sandbox içinde (ağsız, kaynak sınırlı) çalıştırır. PROVEN (çıkış 0), SAFE (1) veya UNVERIFIED (3) yazar. |
 | `vulnhound estimate [path] [--json]` | Tüm repoyu okumanın yaklaşık token maliyeti (bayt/4). |
 | `vulnhound report [--format json\|sarif\|markdown] [-o FILE]` | Bulguları raporlar. |
 | `vulnhound version` | Sürümü yazar. |
 
-Çıkış kodları: 0 tamam / bulgu yok, 1 bulgu var, 2 kullanım hatası veya henüz uygulanmadı.
+Çıkış kodları: 0 tamam / bulgu yok, 1 bulgu var, 2 kullanım hatası (örn. bilinmeyen id), 3 UNVERIFIED (prove).
+
+## Bir bulguyu kanıtlama
+
+`vulnhound prove <id> --poc poc.py`, küçük bağımsız bir Python PoC'sini sandbox içinde (ağ kapalı, bellek/CPU/süre sınırlı, proje salt okunur) çalıştırır ve karar bildirir. PoC, zafiyetli kodu kötü niyetli girdiyle tetikler; sömürü işe yararsa `vulnhound.poc` içinden `proven("ayrıntı")`, engellenirse `safe("ayrıntı")` çağırır. `canary_path()`, path traversal PoC'lerinin okuması için proje dışında gizli bir dosya verir. İşaret yok ve çıkış 0 ise SAFE; sandbox yoksa, zaman aşımı olursa ya da PoC çökerse UNVERIFIED. PoC hiçbir zaman ana makinede çalışmaz.
+
+Not: sandbox için docker veya unshare gerekir. PoC projenize karşı çalışır, bu yüzden üçüncü taraf importları sandbox içinde bulunabilir olmalıdır: `unshare` arka ucu ana makinenin venv'ini salt okunur görür, `docker` arka ucu ise temiz bir python imajı kullanır; framework importu gereken PoC'ler orada UNVERIFIED çıkabilir. PoC kurulu bağımlılıkları import ediyorsa `--backend unshare` seçin.
 
 ## Yol haritası
 

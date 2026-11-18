@@ -45,12 +45,18 @@ pip install vulnhound
 |---|---|
 | `vulnhound analyze [path] [--json] [--no-cache] [--min-severity S]` | Find candidate vulnerabilities. Exit 1 if any. Findings sharing a sink/helper are grouped (`--no-group` to list all); tests/examples/docs dirs and `test_*.py` are skipped unless `--include-tests`; `--include-local-sources` adds local/CLI inputs as sources. |
 | `vulnhound slice <id>` | Minimal code slice for one finding. |
-| `vulnhound prove <id> --poc FILE` | Run a PoC in a sandbox. |
+| `vulnhound prove <id> --poc FILE [--root DIR] [--backend auto\|docker\|unshare] [--timeout S] [--json] [--verbose]` | Run a PoC in a sandbox (no network, resource-limited). Prints PROVEN (exit 0), SAFE (1) or UNVERIFIED (3). |
 | `vulnhound estimate [path] [--json]` | Rough token cost (bytes/4) of reading the whole repo. |
 | `vulnhound report [--format json\|sarif\|markdown] [-o FILE]` | Render findings. |
 | `vulnhound version` | Print version. |
 
-Exit codes: 0 ok / no findings, 1 findings found, 2 usage error or not implemented yet.
+Exit codes: 0 ok / no findings, 1 findings found, 2 usage error (e.g. unknown id), 3 UNVERIFIED (prove).
+
+## Proving a finding
+
+`vulnhound prove <id> --poc poc.py` runs a small standalone Python PoC in a sandbox (network off, memory/CPU/time limited, project mounted read-only) and reports a verdict. The PoC triggers the vulnerable code with a malicious input and calls `proven("detail")` from `vulnhound.poc` when the exploit works, or `safe("detail")` when it is blocked. `canary_path()` returns a secret file outside the project, for path-traversal PoCs to read. No marker and exit 0 means SAFE; sandbox missing, timeout or a crashing PoC means UNVERIFIED. The PoC never runs on the host.
+
+Caveat: the sandbox needs docker or unshare. The PoC runs against your project, so third-party imports must be importable inside it: the `unshare` backend sees the host venv read-only, while the `docker` backend uses a clean python image, so PoCs needing framework imports may report UNVERIFIED there. Pick `--backend unshare` when the PoC imports your installed deps.
 
 ## Roadmap
 

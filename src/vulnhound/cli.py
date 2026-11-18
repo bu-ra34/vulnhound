@@ -134,11 +134,17 @@ def cmd_slice(args: argparse.Namespace) -> int:
 
 
 def cmd_prove(args: argparse.Namespace) -> int:
-    try:
-        from vulnhound import prove  # type: ignore[attr-defined]
-    except ImportError:
-        return _not_implemented("prove")
-    return prove.run(args.id, Path(args.poc))
+    from vulnhound import prove
+
+    return prove.run(
+        Path(args.root).resolve(),
+        args.id,
+        Path(args.poc),
+        backend=args.backend,
+        timeout=args.timeout,
+        as_json=args.json,
+        verbose=args.verbose,
+    )
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -208,6 +214,10 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("id")
     pr.add_argument("--poc", required=True, metavar="FILE")
     pr.add_argument("--root", default=".", help="project root of the last analyze run")
+    pr.add_argument("--backend", choices=["auto", "docker", "unshare"], default="auto")
+    pr.add_argument("--timeout", type=float, default=10.0, help="PoC time limit in seconds")
+    pr.add_argument("--json", action="store_true")
+    pr.add_argument("--verbose", action="store_true", help="also print PoC stdout/stderr")
     pr.set_defaults(func=cmd_prove)
 
     e = sub.add_parser("estimate", help="estimate tokens to naively read the repo")
