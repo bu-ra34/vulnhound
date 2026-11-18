@@ -171,3 +171,26 @@ server never exec()s). Only tp: one gradio path-traversal finding (details withh
 Note: true-positive labels for issues not yet publicly disclosed are kept out of
 this repository until the maintainers have been notified. `precision.py` reports
 such findings as UNLABELED.
+
+## Engine + Claude experiment
+
+Question: can a Claude reviewer, given only each finding's slice (not the label),
+keep the real bug and drop the false positives? Three Claude reviewers judged the
+21 grouped findings in isolation, following the skill's judging questions, with no
+access to the ground-truth labels.
+
+Result against the hidden labels:
+- Real bug (gradio path traversal) kept as real: 1/1.
+- False positives dropped: 19/19.
+- The 1 label-"unclear" finding (mlflow custom_path) was dropped as a false positive.
+
+So the two stages together, on this corpus, surfaced exactly 1 finding to the user,
+the real one, with no false positives. The engine alone has ~5% precision; the
+engine as a pre-filter plus Claude as the judge is what the product is designed
+to be, and on this set it worked.
+
+Caveats: 21 findings with a single true positive is a small sample — the "1/1 TP
+kept" number is one data point, not a rate. Reviewers judged mostly from the slice
+and occasionally opened the referenced lines, which mirrors the skill workflow.
+Harness: benchmarks/judge_prep.py dumps slices with hidden labels; the judging and
+scoring were run out-of-tree.
