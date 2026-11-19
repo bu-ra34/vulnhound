@@ -58,18 +58,6 @@ Exit codes: 0 ok / no findings, 1 findings found, 2 usage error (e.g. unknown id
 
 Caveat: the sandbox needs docker or unshare. The PoC runs against your project, so third-party imports must be importable inside it: the `unshare` backend sees the host venv read-only, while the `docker` backend uses a clean python image, so PoCs needing framework imports may report UNVERIFIED there. Pick `--backend unshare` when the PoC imports your installed deps.
 
-## Roadmap
-
-- [x] M0: skeleton (CLI, plugin, skill, CI)
-- [ ] M1: project index (AST, call graph, cache)
-- [ ] M2: taint engine
-- [ ] M3: framework support and `slice`
-- [ ] M4: sandboxed proof (`prove`)
-- [ ] M5: benchmark
-- [ ] M6: release
-
-No benchmark results are claimed yet; they will be published after M5.
-
 ## Security
 
 Scan only code you own. See [SECURITY.md](SECURITY.md).
